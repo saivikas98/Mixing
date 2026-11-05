@@ -6,13 +6,10 @@ import urllib.request
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
-from plotly.subplots import make_subplots
-from scipy.integrate import solve_ivp
 from scipy.optimize import brentq
 from scipy.special import factorial
 import streamlit as st
 
-# Optional PyTorch import for the PINN Surrogate & Autograd Optimizer tab
 try:
     import torch
     import torch.nn as nn
@@ -20,7 +17,6 @@ try:
 except ImportError:
     HAS_TORCH = False
 
-# Optional NIST/DIPPR 'thermo' library import
 try:
     from thermo.chemical import Chemical
     HAS_THERMO = True
@@ -35,80 +31,80 @@ st.set_page_config(
 
 
 # ==============================================================================
-# MODULE 1: TRUSTED SOLVENT PROPERTY ENGINE (PUBCHEM API + DIPPR/NIST + MANUAL)
+# MODULE 1: N-COMPONENT MULTI-SOLVENT ENGINE (PUBCHEM API + DIPPR/NIST + MANUAL)
 # ==============================================================================
-class TrustedSolventPropertyEngine:
+class MultiSolventPropertyEngine:
     """
-    Provides pure-solvent, binary co-solvent mixture, and manual thermophysical
-    properties coupled with live PubChem PUG-REST metadata verification.
+    Evaluates pure solvents, arbitrary N-component multi-solvent mixtures
+    (Grunberg-Nissan viscosity matrix, Li thermal conductivity, Winterfeld surface
+    tension, Raoult-Activity bubble point), live PubChem API lookups, and manual overrides.
     """
     DIPPR_DATABASE = {
         "Water": {
             "cas": "7732-18-5", "mw": 18.015, "rho_25": 997.0, "beta_rho": 0.26,
             "mu_25_cP": 0.890, "E_mu_R": 1850.0, "Cp": 4184.0, "k_f": 0.606,
-            "sigma_mN": 72.0, "bp_C": 100.0, "antoine": (8.07131, 1730.63, 233.426)
+            "sigma_mN": 72.0, "bp_C": 100.0, "antoine": (8.07131, 1730.63, 233.426), "polarity": "aqueous"
         },
         "Methanol": {
             "cas": "67-56-1", "mw": 32.04, "rho_25": 786.6, "beta_rho": 0.94,
             "mu_25_cP": 0.544, "E_mu_R": 1260.0, "Cp": 2531.0, "k_f": 0.200,
-            "sigma_mN": 22.1, "bp_C": 64.7, "antoine": (8.08097, 1582.27, 239.726)
+            "sigma_mN": 22.1, "bp_C": 64.7, "antoine": (8.08097, 1582.27, 239.726), "polarity": "protic"
         },
         "Ethanol": {
             "cas": "64-17-5", "mw": 46.07, "rho_25": 785.2, "beta_rho": 0.86,
             "mu_25_cP": 1.074, "E_mu_R": 1680.0, "Cp": 2440.0, "k_f": 0.167,
-            "sigma_mN": 22.0, "bp_C": 78.3, "antoine": (8.11220, 1592.86, 226.184)
+            "sigma_mN": 22.0, "bp_C": 78.3, "antoine": (8.11220, 1592.86, 226.184), "polarity": "protic"
         },
         "Isopropanol (IPA)": {
             "cas": "67-63-0", "mw": 60.10, "rho_25": 781.2, "beta_rho": 0.83,
             "mu_25_cP": 2.038, "E_mu_R": 2450.0, "Cp": 2680.0, "k_f": 0.135,
-            "sigma_mN": 21.0, "bp_C": 82.3, "antoine": (8.11778, 1580.92, 219.610)
+            "sigma_mN": 21.0, "bp_C": 82.3, "antoine": (8.11778, 1580.92, 219.610), "polarity": "protic"
         },
         "Acetone": {
             "cas": "67-64-1", "mw": 58.08, "rho_25": 784.5, "beta_rho": 1.12,
             "mu_25_cP": 0.306, "E_mu_R": 860.0, "Cp": 2150.0, "k_f": 0.159,
-            "sigma_mN": 23.0, "bp_C": 56.1, "antoine": (7.11714, 1210.60, 229.664)
+            "sigma_mN": 23.0, "bp_C": 56.1, "antoine": (7.11714, 1210.60, 229.664), "polarity": "aprotic"
         },
         "Acetonitrile (ACN)": {
             "cas": "75-05-8", "mw": 41.05, "rho_25": 776.6, "beta_rho": 1.08,
             "mu_25_cP": 0.341, "E_mu_R": 890.0, "Cp": 2230.0, "k_f": 0.188,
-            "sigma_mN": 28.7, "bp_C": 81.6, "antoine": (7.11988, 1314.40, 230.000)
+            "sigma_mN": 28.7, "bp_C": 81.6, "antoine": (7.11988, 1314.40, 230.000), "polarity": "aprotic"
         },
         "Ethyl Acetate": {
             "cas": "141-78-6", "mw": 88.11, "rho_25": 894.5, "beta_rho": 1.18,
             "mu_25_cP": 0.423, "E_mu_R": 1020.0, "Cp": 1935.0, "k_f": 0.144,
-            "sigma_mN": 23.4, "bp_C": 77.1, "antoine": (7.10179, 1244.95, 217.881)
+            "sigma_mN": 23.4, "bp_C": 77.1, "antoine": (7.10179, 1244.95, 217.881), "polarity": "aprotic"
         },
         "Dichloromethane (DCM)": {
             "cas": "75-09-2", "mw": 84.93, "rho_25": 1316.8, "beta_rho": 1.82,
             "mu_25_cP": 0.413, "E_mu_R": 850.0, "Cp": 1188.0, "k_f": 0.139,
-            "sigma_mN": 27.2, "bp_C": 39.6, "antoine": (7.08030, 1138.91, 231.450)
+            "sigma_mN": 27.2, "bp_C": 39.6, "antoine": (7.08030, 1138.91, 231.450), "polarity": "nonpolar"
         },
         "Tetrahydrofuran (THF)": {
             "cas": "109-99-9", "mw": 72.11, "rho_25": 883.3, "beta_rho": 1.05,
             "mu_25_cP": 0.456, "E_mu_R": 980.0, "Cp": 1765.0, "k_f": 0.120,
-            "sigma_mN": 26.4, "bp_C": 66.0, "antoine": (6.99515, 1202.29, 226.254)
+            "sigma_mN": 26.4, "bp_C": 66.0, "antoine": (6.99515, 1202.29, 226.254), "polarity": "aprotic"
         },
         "Toluene": {
             "cas": "108-88-3", "mw": 92.14, "rho_25": 862.3, "beta_rho": 0.93,
             "mu_25_cP": 0.560, "E_mu_R": 1070.0, "Cp": 1700.0, "k_f": 0.131,
-            "sigma_mN": 27.9, "bp_C": 110.6, "antoine": (6.95464, 1343.94, 219.387)
+            "sigma_mN": 27.9, "bp_C": 110.6, "antoine": (6.95464, 1343.94, 219.387), "polarity": "nonpolar"
         },
         "Dimethylformamide (DMF)": {
             "cas": "68-12-2", "mw": 73.09, "rho_25": 944.0, "beta_rho": 0.95,
             "mu_25_cP": 0.794, "E_mu_R": 1180.0, "Cp": 2060.0, "k_f": 0.184,
-            "sigma_mN": 36.4, "bp_C": 153.0, "antoine": (7.10850, 1537.78, 210.390)
+            "sigma_mN": 36.4, "bp_C": 153.0, "antoine": (7.10850, 1537.78, 210.390), "polarity": "aprotic"
         },
         "Dimethyl Sulfoxide (DMSO)": {
             "cas": "67-68-5", "mw": 78.13, "rho_25": 1095.5, "beta_rho": 1.00,
             "mu_25_cP": 1.991, "E_mu_R": 1720.0, "Cp": 1955.0, "k_f": 0.200,
-            "sigma_mN": 42.9, "bp_C": 189.0, "antoine": (7.23039, 1733.00, 199.160)
+            "sigma_mN": 42.9, "bp_C": 189.0, "antoine": (7.23039, 1733.00, 199.160), "polarity": "aprotic"
         },
     }
 
     @staticmethod
     @st.cache_data(ttl=3600, show_spinner=False)
     def fetch_pubchem_live(query_str: str) -> dict:
-        """Queries NCBI PubChem PUG-REST API for chemical verification."""
         clean_q = query_str.split(" (")[0].strip()
         url = (
             f"https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/name/"
@@ -116,7 +112,7 @@ class TrustedSolventPropertyEngine:
             f"property/IUPACName,MolecularWeight,MolecularFormula,XLogP/JSON"
         )
         try:
-            req = urllib.request.Request(url, headers={"User-Agent": "MixingDigitalTwin/2.0"})
+            req = urllib.request.Request(url, headers={"User-Agent": "MixingDigitalTwin/3.0"})
             with urllib.request.urlopen(req, timeout=3.5) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
                 p = data["PropertyTable"]["Properties"][0]
@@ -125,7 +121,8 @@ class TrustedSolventPropertyEngine:
                     "source_badge": f"PubChem Live Verified (CID {p.get('CID')})",
                     "cid": p.get("CID"),
                     "formula": p.get("MolecularFormula", "N/A"),
-                    "mw": float(p.get("MolecularWeight", 0.0)),
+                    "mw": float(p.get("MolecularWeight", 60.0)),
+                    "xlogp": float(p.get("XLogP", 0.0)),
                     "iupac": p.get("IUPACName", clean_q),
                 }
         except Exception:
@@ -134,94 +131,163 @@ class TrustedSolventPropertyEngine:
                 "source_badge": "Built-in DIPPR 801 / NIST Standard Table",
                 "cid": None,
                 "formula": "Verified Reference",
-                "mw": None,
+                "mw": 60.0,
+                "xlogp": 0.0,
                 "iupac": clean_q,
             }
 
     @classmethod
     def evaluate_pure(cls, name: str, T_C: float) -> dict:
         T_K = T_C + 273.15
-        if HAS_THERMO:
+        if HAS_THERMO and name not in cls.DIPPR_DATABASE:
             try:
                 c = Chemical(name.split(" (")[0], T=T_K, P=101325.0)
                 if c.rho and c.mu:
                     return {
-                        "name": name,
-                        "cas": c.CAS,
-                        "mw": c.MW,
-                        "rho": float(c.rho),
-                        "mu_cP": float(c.mu) * 1000.0,
-                        "E_mu_R": 1500.0,
-                        "Cp": float(c.Cp or 2000.0),
-                        "k_f": float(c.k or 0.16),
-                        "sigma_mN": float(c.sigma or 0.025) * 1000.0,
-                        "P_vap_Pa": float(c.Psat or 3000.0),
-                        "bp_C": float(c.Tb or 350.0) - 273.15,
-                        "antoine": cls.DIPPR_DATABASE.get(name, cls.DIPPR_DATABASE["Water"])["antoine"],
+                        "name": name, "cas": c.CAS, "mw": float(c.MW),
+                        "rho": float(c.rho), "mu_cP": float(c.mu) * 1000.0,
+                        "E_mu_R": 1500.0, "Cp": float(c.Cp or 2000.0),
+                        "k_f": float(c.k or 0.16), "sigma_mN": float(c.sigma or 0.025) * 1000.0,
+                        "P_vap_Pa": float(c.Psat or 3000.0), "bp_C": float(c.Tb or 350.0) - 273.15,
+                        "antoine": (7.40, 1450.0, 225.0), "polarity": "aprotic"
                     }
             except Exception:
                 pass
 
-        s = cls.DIPPR_DATABASE[name]
+        s = cls.DIPPR_DATABASE.get(name, cls.DIPPR_DATABASE["Isopropanol (IPA)"])
         rho_T = s["rho_25"] - s["beta_rho"] * (T_C - 25.0)
         mu_T_cP = s["mu_25_cP"] * np.exp(s["E_mu_R"] * (1.0 / T_K - 1.0 / 298.15))
         A, B, C = s["antoine"]
         P_vap_Pa = 133.322 * (10.0 ** (A - B / (T_C + C)))
         return {
-            "name": name,
-            "cas": s["cas"],
-            "mw": s["mw"],
-            "rho": rho_T,
-            "mu_cP": mu_T_cP,
-            "E_mu_R": s["E_mu_R"],
-            "Cp": s["Cp"],
-            "k_f": s["k_f"],
+            "name": name, "cas": s["cas"], "mw": s["mw"],
+            "rho": rho_T, "mu_cP": mu_T_cP, "E_mu_R": s["E_mu_R"],
+            "Cp": s["Cp"], "k_f": s["k_f"],
             "sigma_mN": max(5.0, s["sigma_mN"] - 0.11 * (T_C - 25.0)),
-            "P_vap_Pa": P_vap_Pa,
-            "bp_C": s["bp_C"],
-            "antoine": s["antoine"],
+            "P_vap_Pa": P_vap_Pa, "bp_C": s["bp_C"],
+            "antoine": s["antoine"], "polarity": s["polarity"]
         }
 
     @classmethod
-    def evaluate_binary_mixture(
-        cls, solv1: str, solv2: str, w1_frac: float, T_C: float, G12: float = 0.85
+    def pair_grunberg_nissan_Gij(cls, pol_i: str, pol_j: str, scale_factor: float = 1.0) -> float:
+        """Estimates binary Grunberg-Nissan viscosity interaction parameter G_ij from polarity classes."""
+        pair = {pol_i, pol_j}
+        if pair == {"aqueous", "protic"}:
+            return 0.95 * scale_factor   # Strong H-bonding viscosity maximum (Water + Alcohols)
+        if pair == {"aqueous", "aprotic"}:
+            return 0.55 * scale_factor   # Water + DMSO / DMF / Acetone комплексация
+        if pair == {"protic", "aprotic"}:
+            return 0.15 * scale_factor
+        if "nonpolar" in pair and ("aqueous" in pair or "protic" in pair):
+            return -0.25 * scale_factor  # Structure-breaking negative deviation
+        return 0.05 * scale_factor
+
+    @classmethod
+    def evaluate_multisolvent_mixture(
+        cls, component_weights: dict, T_C: float, G_scale: float = 1.0
     ) -> dict:
-        p1 = cls.evaluate_pure(solv1, T_C)
-        p2 = cls.evaluate_pure(solv2, T_C)
-        w1 = np.clip(w1_frac, 0.0, 1.0)
-        w2 = 1.0 - w1
+        """
+        Evaluates an arbitrary N-component solvent blend using:
+          - Amagat Volume Additivity for Density
+          - N-Component Grunberg-Nissan Matrix for Viscosity
+          - Li Volume-Fraction Harmonic Rule for Thermal Conductivity
+          - Winterfeld-Scriven-Davis Rule for Surface Tension
+          - Raoult-Activity Law for Vapor Pressure & Bubble Point
+        """
+        names = list(component_weights.keys())
+        raw_w = np.array([max(float(component_weights[k]), 0.0) for k in names], dtype=float)
+        if np.sum(raw_w) <= 1e-12:
+            raw_w = np.ones_like(raw_w)
+        w = raw_w / np.sum(raw_w)
+        n_comp = len(names)
 
-        n1, n2 = w1 / p1["mw"], w2 / p2["mw"]
-        x1 = n1 / max(n1 + n2, 1e-12)
-        x2 = 1.0 - x1
+        pure_list = [cls.evaluate_pure(nm, T_C) for nm in names]
+        mws = np.array([p["mw"] for p in pure_list])
+        rhos = np.array([p["rho"] for p in pure_list])
+        mus = np.array([p["mu_cP"] for p in pure_list])
+        cps = np.array([p["Cp"] for p in pure_list])
+        kfs = np.array([p["k_f"] for p in pure_list])
+        sigs = np.array([p["sigma_mN"] for p in pure_list])
+        pvaps = np.array([p["P_vap_Pa"] for p in pure_list])
 
-        rho_mix = 1.0 / (w1 / p1["rho"] + w2 / p2["rho"])
-        ln_mu_mix = x1 * np.log(p1["mu_cP"]) + x2 * np.log(p2["mu_cP"]) + x1 * x2 * G12
-        mu_mix_cP = float(np.exp(ln_mu_mix))
-        Cp_mix = w1 * p1["Cp"] + w2 * p2["Cp"]
-        k_mix = w1 * p1["k_f"] + w2 * p2["k_f"] - 0.72 * w1 * w2 * abs(p1["k_f"] - p2["k_f"])
-        sigma_mix = x1 * p1["sigma_mN"] + x2 * p2["sigma_mN"]
-        P_vap_mix = x1 * p1["P_vap_Pa"] + x2 * p2["P_vap_Pa"]
-        E_mu_mix = x1 * p1["E_mu_R"] + x2 * p2["E_mu_R"]
+        # Mole fractions (x_i) and volume fractions (phi_i)
+        moles = w / mws
+        x = moles / np.sum(moles)
+        vols = w / rhos
+        phi = vols / np.sum(vols)
+
+        # 1. Mixture Density (kg/m3)
+        rho_mix = 1.0 / np.sum(w / rhos)
+
+        # 2. N-Component Grunberg-Nissan Viscosity (cP)
+        ln_mu = np.sum(x * np.log(mus))
+        for i in range(n_comp):
+            for j in range(i + 1, n_comp):
+                G_ij = cls.pair_grunberg_nissan_Gij(
+                    pure_list[i]["polarity"], pure_list[j]["polarity"], G_scale
+                )
+                ln_mu += x[i] * x[j] * G_ij
+        mu_mix_cP = float(np.exp(ln_mu))
+
+        # 3. Li Volume-Fraction Harmonic Thermal Conductivity (W/m·K)
+        k_mix = 0.0
+        sigma_mix = 0.0
+        for i in range(n_comp):
+            for j in range(n_comp):
+                k_ij = (2.0 * kfs[i] * kfs[j]) / max(kfs[i] + kfs[j], 1e-9)
+                k_mix += phi[i] * phi[j] * k_ij
+                sigma_mix += phi[i] * phi[j] * np.sqrt(sigs[i] * sigs[j])
+
+        # 4. Mass-Weighted Specific Heat Capacity (J/kg·K)
+        Cp_mix = float(np.sum(w * cps))
+
+        # 5. Multi-Component Vapor Pressure Function at any Temperature T_eval (°C)
+        def calc_pvap_mix_at_T(T_eval_C: float) -> float:
+            pv_tot = 0.0
+            for idx, p in enumerate(pure_list):
+                A, B, C = p["antoine"]
+                pv_i = 133.322 * (10.0 ** (A - B / (T_eval_C + C)))
+                pv_tot += x[idx] * pv_i
+            return float(pv_tot)
+
+        P_vap_mix = calc_pvap_mix_at_T(T_C)
+
+        # Solve normal bubble point (at 101,325 Pa) via Brent's method
+        try:
+            bp_mix_C = brentq(lambda t_c: calc_pvap_mix_at_T(t_c) - 101325.0, -20.0, 260.0, xtol=0.05)
+        except ValueError:
+            bp_mix_C = float(np.sum(x * np.array([p["bp_C"] for p in pure_list])))
+
+        label_parts = [f"{w[idx]*100:.0f}% {names[idx].split(' (')[0]}" for idx in range(n_comp) if w[idx] > 0.005]
+        composition_table = pd.DataFrame({
+            "Solvent Component": names,
+            "CAS No.": [p["cas"] for p in pure_list],
+            "Mass Frac (wt%)": np.round(w * 100.0, 2),
+            "Mole Frac (mol%)": np.round(x * 100.0, 2),
+            "Vol Frac (vol%)": np.round(phi * 100.0, 2),
+            "Pure ρ (kg/m³)": np.round(rhos, 1),
+            "Pure μ (cP)": np.round(mus, 3),
+            "Pure Bp (°C)": np.round([p["bp_C"] for p in pure_list], 1),
+        })
 
         return {
-            "name": f"{w1*100:.0f}% {solv1} + {w2*100:.0f}% {solv2}",
-            "cas": f"{p1['cas']} / {p2['cas']}",
-            "mw": x1 * p1["mw"] + x2 * p2["mw"],
-            "rho": rho_mix,
+            "name": " + ".join(label_parts),
+            "cas": f"{n_comp}-Solvent Blend",
+            "mw": float(np.sum(x * mws)),
+            "rho": float(rho_mix),
             "mu_cP": mu_mix_cP,
-            "E_mu_R": E_mu_mix,
             "Cp": Cp_mix,
-            "k_f": k_mix,
-            "sigma_mN": sigma_mix,
+            "k_f": float(k_mix),
+            "sigma_mN": float(sigma_mix),
             "P_vap_Pa": P_vap_mix,
-            "bp_C": x1 * p1["bp_C"] + x2 * p2["bp_C"],
-            "antoine": p1["antoine"] if x1 >= 0.5 else p2["antoine"],
+            "bp_C": float(bp_mix_C),
+            "pvap_fn": calc_pvap_mix_at_T,
+            "composition_df": composition_table,
         }
 
 
 # ==============================================================================
-# MODULE 2: PARAMETRIC VESSEL, BAFFLE & AGITATOR GEOMETRY ENGINE + 3D CAD
+# MODULE 2: PARAMETRIC VESSEL, BAFFLE & AGITATOR GEOMETRY + 3D FLOW ANIMATION
 # ==============================================================================
 DISH_SHAPES = {
     "2:1 Ellipsoidal":          {"h_ratio": 0.250, "v_coeff": 0.1309, "a_coeff": 1.0840, "f_dish": 0.92},
@@ -282,7 +348,6 @@ def compute_parametric_geometry(
     imp_name: str, D_ag: float, n_tiers: int, spacing_over_D: float, C1_over_T: float,
     n_blades: int, pitch_deg: float, Wimp_over_D: float
 ) -> dict:
-    """Computes exact vessel dimensions, jacket area, and geometry-modified impeller constants."""
     V_m3 = V_L / 1000.0
     dish = DISH_SHAPES[dish_name]
     imp = IMPELLER_CATALOG[imp_name]
@@ -293,12 +358,10 @@ def compute_parametric_geometry(
     H_total = H_cyl + h_dish
     A_jacket = np.pi * T_m * H_cyl + dish["a_coeff"] * (T_m ** 2)
 
-    # Baffle Solidity Index modifiers
     omega_b = n_baffles * Wb_over_T
     phi_P_baf = 0.28 + 0.72 * (1.0 - np.exp(-3.45 * (omega_b / 0.3333)))
     phi_Q_baf = 0.45 + 0.55 * np.tanh(2.60 * (omega_b / 0.3333))
 
-    # Impeller Blade Shape & Clearance Modifiers
     pitch_rad = np.deg2rad(pitch_deg)
     pitch_ref_rad = np.deg2rad(imp["pitch_ref"])
     sin_ratio = np.sin(pitch_rad) / max(np.sin(pitch_ref_rad), 1e-4)
@@ -311,7 +374,6 @@ def compute_parametric_geometry(
     phi_Q_width = (Wimp_over_D / imp["wd_ref"]) ** 0.65
     phi_P_clear = (C1_over_T / 0.25) ** (-0.18 * np.cos(pitch_rad))
 
-    # Multi-tier spacing interference factor
     f_tier = 1.0 - 0.65 * np.exp(-1.15 * spacing_over_D) if n_tiers > 1 else 1.0
     tier_P_mult = 1.0 + (n_tiers - 1) * f_tier
     tier_Q_mult = 1.0 + 0.75 * (n_tiers - 1) * f_tier
@@ -345,71 +407,191 @@ def compute_parametric_geometry(
     }
 
 
-def build_3d_vessel_agitator_figure(
-    geom: dict, dish_name: str, n_baffles: int, Wb_over_T: float,
+def evaluate_3d_velocity_field(
+    r: np.ndarray, theta: np.ndarray, z: np.ndarray,
+    geom: dict, comm_state: dict, n_tiers: int, spacing_over_D: float,
+    C1_over_T: float, pitch_deg: float, n_baffles: int, Wb_over_T: float
+):
+    """
+    Evaluates the 3D cylindrical velocity components (u_r, u_theta, u_z) and local
+    speed magnitude |u| (m/s) at particle positions (r, theta, z), accounting for:
+      - Axial floor-sweeping vs Radial figure-8 loops (governed by pitch angle theta_b)
+      - Multi-tier circulation cells
+      - Tangential swirl (governed by baffle solidity)
+      - Yield-stress cavern boundary attenuation (Dc / T)
+      - Bottom Rotor-Stator suction intake and radial slot jet
+    """
+    R = geom["T_m"] / 2.0
+    H_tot = geom["H_total"]
+    R_ag = geom["D_ag"] / 2.0
+    pitch_rad = np.deg2rad(pitch_deg)
+    ax_weight = float(np.cos(pitch_rad))
+    rad_weight = float(np.sin(pitch_rad))
+
+    V_circ = max(comm_state["v_bulk"] * (geom["T_m"] / geom["D_ag"]) * 2.2, 0.15)
+    v_tip = comm_state["v_tip_ag"]
+
+    r_norm = np.clip(r / R, 0.02, 0.96)
+    u_r = np.zeros_like(r)
+    u_z = np.zeros_like(z)
+
+    z_bottom_imp = C1_over_T * geom["T_m"]
+    cell_half_h = max(0.5 * spacing_over_D * geom["D_ag"], 0.22 * H_tot)
+
+    for k in range(n_tiers):
+        z_k = z_bottom_imp + k * spacing_over_D * geom["D_ag"]
+        dz_norm = np.clip((z - z_k) / cell_half_h, -1.2, 1.2)
+        env_k = np.exp(-1.6 * (dz_norm ** 2))
+
+        # Axial loop: downflow in core (r_norm < 0.62), upflow near wall (r_norm > 0.62)
+        uz_ax = -V_circ * np.cos(0.5 * np.pi * np.clip(dz_norm, -1.0, 1.0)) * (1.0 - 2.60 * (r_norm ** 2))
+        ur_ax = -V_circ * np.sin(0.5 * np.pi * np.clip(dz_norm, -1.0, 1.0)) * r_norm * (1.0 - r_norm ** 2) * 1.4
+
+        # Radial figure-8 twin loop: outward jet at z_k, splitting up/down at wall
+        ur_rad = V_circ * np.cos(np.pi * np.clip(dz_norm, -1.0, 1.0)) * np.sin(np.pi * r_norm)
+        uz_rad = V_circ * np.sin(np.pi * np.clip(dz_norm, -1.0, 1.0)) * (2.0 * r_norm - 1.0)
+
+        u_r += env_k * (ax_weight * ur_ax + rad_weight * ur_rad)
+        u_z += env_k * (ax_weight * uz_ax + rad_weight * uz_rad)
+
+    # Bottom Rotor-Stator high-shear jet near dish floor (z < 0.18 * H_tot)
+    rs_zone = np.exp(-((z / (0.14 * H_tot)) ** 2))
+    u_r += rs_zone * 0.35 * comm_state["v_tip_rs"] * np.exp(-3.5 * r_norm) * (r_norm / 0.25)
+    u_z -= rs_zone * 0.20 * comm_state["v_tip_rs"] * np.exp(-6.0 * (r_norm ** 2))
+
+    # Tangential Swirl (damped by wall baffles)
+    omega_b = n_baffles * Wb_over_T
+    swirl_factor = 0.18 + 0.82 * np.exp(-3.8 * (omega_b / 0.3333))
+    r_over_rag = r / max(R_ag, 0.05)
+    u_theta = v_tip * swirl_factor * (2.0 * r_over_rag) / (1.0 + r_over_rag ** 2)
+
+    # Yield-Stress Cavern Stagnation Filter (Dc / T)
+    R_cav = comm_state["Dc_over_T"] * R
+    psi_cav = 1.0 / (1.0 + np.exp(14.0 * (r - R_cav) / R))
+
+    u_r *= psi_cav
+    u_z *= psi_cav
+    u_theta *= psi_cav
+    speed_mag = np.sqrt(u_r ** 2 + u_theta ** 2 + u_z ** 2)
+    return u_r, u_theta, u_z, speed_mag
+
+
+def build_animated_3d_vessel_figure(
+    geom: dict, comm_state: dict, dish_name: str, n_baffles: int, Wb_over_T: float,
     n_tiers: int, spacing_over_D: float, C1_over_T: float,
-    n_blades: int, pitch_deg: float, Wimp_over_D: float, D_rs: float
+    n_blades: int, pitch_deg: float, Wimp_over_D: float, D_rs: float,
+    n_particles: int = 320, n_frames: int = 28
 ) -> go.Figure:
-    """Generates an interactive 3D Plotly CAD mesh of the parametric vessel, baffles, and agitator."""
-    fig = go.Figure()
+    """
+    Builds a 3D Plotly CAD reactor with multi-frame Lagrangian fluid particle animation
+    and rotating impeller blades.
+    """
     R = geom["T_m"] / 2.0
     h_dish = geom["h_dish"]
-    H_cyl = geom["H_cyl"]
     H_tot = geom["H_total"]
     R_ag = geom["D_ag"] / 2.0
 
-    theta = np.linspace(0, 2 * np.pi, 48)
-    # 1. Cylindrical Vessel Shell (z from h_dish to H_tot)
-    z_cyl = np.linspace(h_dish, H_tot, 20)
-    Theta_c, Z_c = np.meshgrid(theta, z_cyl)
-    X_c = R * np.cos(Theta_c)
-    Y_c = R * np.sin(Theta_c)
-    fig.add_trace(go.Surface(
-        x=X_c, y=Y_c, z=Z_c, opacity=0.22, showscale=False,
-        colorscale=[[0, "#64b5f6"], [1, "#1e88e5"]], name="Vessel Wall"
+    # Initialize Lagrangian tracer particles throughout the liquid volume
+    rng = np.random.default_rng(42)
+    p_r = R * np.sqrt(rng.uniform(0.03, 0.88, n_particles))
+    p_theta = rng.uniform(0.0, 2.0 * np.pi, n_particles)
+    p_z = rng.uniform(0.06 * H_tot, 0.93 * H_tot, n_particles)
+
+    # Dish floor clipping helper
+    def clip_to_vessel(r_arr, z_arr):
+        r_c = np.clip(r_arr, 0.03 * R, 0.92 * R)
+        if dish_name == "Flat Bottom":
+            z_floor = 0.02 * H_tot
+        elif dish_name == "Conical (45°)":
+            z_floor = h_dish * (r_c / R) + 0.02 * H_tot
+        else:
+            z_floor = h_dish * (1.0 - np.sqrt(np.maximum(0.0, 1.0 - (r_c / R) ** 2))) + 0.02 * H_tot
+        z_c = np.clip(z_arr, z_floor, 0.94 * H_tot)
+        return r_c, z_c
+
+    p_r, p_z = clip_to_vessel(p_r, p_z)
+    u_r0, u_th0, u_z0, spd0 = evaluate_3d_velocity_field(
+        p_r, p_theta, p_z, geom, comm_state, n_tiers, spacing_over_D,
+        C1_over_T, pitch_deg, n_baffles, Wb_over_T
+    )
+
+    # Trace 0: Animated Lagrangian Fluid Particles (with velocity tail segments)
+    px0 = p_r * np.cos(p_theta)
+    py0 = p_r * np.sin(p_theta)
+
+    fig = go.Figure()
+    fig.add_trace(go.Scatter3d(
+        x=px0, y=py0, z=p_z,
+        mode="markers",
+        marker=dict(
+            size=4.5,
+            color=spd0,
+            colorscale="Turbo",
+            cmin=0.0,
+            cmax=max(float(np.percentile(spd0, 96)), 0.5),
+            colorbar=dict(title="Fluid Velocity |u| (m/s)", thickness=14, x=0.98),
+            opacity=0.92,
+        ),
+        name="Fluid Parcels",
     ))
 
-    # 2. Parametric Bottom Dish Head (z from 0 to h_dish)
-    u_d = np.linspace(0.0, 1.0, 18)
-    Theta_d, U_d = np.meshgrid(theta, u_d)
+    # Static Vessel Shell & Dish Surfaces
+    theta_grid = np.linspace(0, 2 * np.pi, 40)
+    z_cyl = np.linspace(h_dish, H_tot, 16)
+    Th_c, Z_c = np.meshgrid(theta_grid, z_cyl)
+    fig.add_trace(go.Surface(
+        x=R * np.cos(Th_c), y=R * np.sin(Th_c), z=Z_c,
+        opacity=0.18, showscale=False, colorscale=[[0, "#64b5f6"], [1, "#1e88e5"]], name="Vessel Wall"
+    ))
+
+    u_d = np.linspace(0.0, 1.0, 15)
+    Th_d, U_d = np.meshgrid(theta_grid, u_d)
     if dish_name == "Flat Bottom":
-        R_d = R * U_d
-        Z_d = np.zeros_like(R_d)
+        R_d, Z_d = R * U_d, np.zeros_like(U_d)
     elif dish_name == "Conical (45°)":
-        R_d = R * U_d
-        Z_d = h_dish * U_d
+        R_d, Z_d = R * U_d, h_dish * U_d
     else:
-        # Ellipsoidal / Hemispherical / Torispherical smooth contour
         R_d = R * np.sin(0.5 * np.pi * U_d)
         Z_d = h_dish * (1.0 - np.cos(0.5 * np.pi * U_d))
     fig.add_trace(go.Surface(
-        x=R_d * np.cos(Theta_d), y=R_d * np.sin(Theta_d), z=Z_d,
-        opacity=0.30, showscale=False, colorscale=[[0, "#4fc3f7"], [1, "#0288d1"]], name=dish_name
+        x=R_d * np.cos(Th_d), y=R_d * np.sin(Th_d), z=Z_d,
+        opacity=0.25, showscale=False, colorscale=[[0, "#4fc3f7"], [1, "#0288d1"]], name=dish_name
     ))
 
-    # 3. Wall Baffles
+    # Yield-Stress Cavern Boundary Cylinder Ring (if Dc/T < 1.0)
+    if comm_state["Dc_over_T"] < 0.99:
+        R_cav = comm_state["Dc_over_T"] * R
+        z_cav = np.linspace(0.08 * H_tot, 0.90 * H_tot, 10)
+        Th_cv, Z_cv = np.meshgrid(theta_grid, z_cav)
+        fig.add_trace(go.Surface(
+            x=R_cav * np.cos(Th_cv), y=R_cav * np.sin(Th_cv), z=Z_cv,
+            opacity=0.16, showscale=False, colorscale=[[0, "#ef5350"], [1, "#e53935"]],
+            name="Cavern Stagnation Boundary"
+        ))
+
+    # Wall Baffles
     if n_baffles > 0:
         W_b = Wb_over_T * geom["T_m"]
         c_wall = 0.018 * geom["T_m"]
         for b_idx in range(n_baffles):
             ang = (2.0 * np.pi * b_idx) / n_baffles
-            r_outer = R - c_wall
-            r_inner = max(r_outer - W_b, 0.05)
-            rb_grid, zb_grid = np.meshgrid([r_inner, r_outer], [h_dish + 0.03 * H_tot, 0.96 * H_tot])
+            r_out = R - c_wall
+            r_in = max(r_out - W_b, 0.05)
+            rb_g, zb_g = np.meshgrid([r_in, r_out], [h_dish + 0.03 * H_tot, 0.96 * H_tot])
             fig.add_trace(go.Surface(
-                x=rb_grid * np.cos(ang), y=rb_grid * np.sin(ang), z=zb_grid,
-                opacity=0.80, showscale=False, colorscale=[[0, "#90a4ae"], [1, "#546e7a"]],
+                x=rb_g * np.cos(ang), y=rb_g * np.sin(ang), z=zb_g,
+                opacity=0.75, showscale=False, colorscale=[[0, "#90a4ae"], [1, "#546e7a"]],
                 name=f"Baffle {b_idx+1}"
             ))
 
-    # 4. Central Agitator Shaft
+    # Central Agitator Shaft
     z_bottom_imp = C1_over_T * geom["T_m"]
     fig.add_trace(go.Scatter3d(
-        x=[0, 0], y=[0, 0], z=[z_bottom_imp * 0.85, H_tot * 1.12],
-        mode="lines", line=dict(color="#cfd8dc", width=11), name="Agitator Shaft"
+        x=[0, 0], y=[0, 0], z=[z_bottom_imp * 0.85, H_tot * 1.10],
+        mode="lines", line=dict(color="#eceff1", width=10), name="Shaft"
     ))
 
-    # 5. Multi-Tier Parametric Impeller Blades
+    # Multi-Tier Impeller Blades
     blade_w = Wimp_over_D * geom["D_ag"]
     pitch_rad = np.deg2rad(pitch_deg)
     for t_idx in range(n_tiers):
@@ -418,52 +600,87 @@ def build_3d_vessel_agitator_figure(
             break
         for bl_idx in range(n_blades):
             base_ang = (2.0 * np.pi * bl_idx) / n_blades
-            r_span = np.linspace(0.18 * R_ag, R_ag, 6)
-            w_span = np.linspace(-0.5 * blade_w, 0.5 * blade_w, 4)
+            r_span = np.linspace(0.18 * R_ag, R_ag, 5)
+            w_span = np.linspace(-0.5 * blade_w, 0.5 * blade_w, 3)
             R_b, W_b_mesh = np.meshgrid(r_span, w_span)
             X_b = R_b * np.cos(base_ang) - W_b_mesh * np.cos(pitch_rad) * np.sin(base_ang)
             Y_b = R_b * np.sin(base_ang) + W_b_mesh * np.cos(pitch_rad) * np.cos(base_ang)
             Z_b = z_hub + W_b_mesh * np.sin(pitch_rad)
             fig.add_trace(go.Surface(
                 x=X_b, y=Y_b, z=Z_b, opacity=0.95, showscale=False,
-                colorscale=[[0, "#ffb300"], [1, "#fb8c00"]], name=f"Tier {t_idx+1} Blade"
+                colorscale=[[0, "#ffb300"], [1, "#fb8c00"]], name="Impeller Blade"
             ))
 
-    # 6. Bottom / Inline Rotor-Stator Head at Dish Center
+    # Bottom Rotor-Stator Head
     r_rs = D_rs / 2.0
-    th_rs = np.linspace(0, 2 * np.pi, 24)
-    z_rs_vals = np.linspace(0.02 * H_tot, 0.02 * H_tot + 0.35 * D_rs, 4)
+    th_rs = np.linspace(0, 2 * np.pi, 20)
+    z_rs_vals = np.linspace(0.02 * H_tot, 0.02 * H_tot + 0.35 * D_rs, 3)
     Th_r, Z_r = np.meshgrid(th_rs, z_rs_vals)
     fig.add_trace(go.Surface(
         x=r_rs * np.cos(Th_r), y=r_rs * np.sin(Th_r), z=Z_r,
         opacity=0.95, showscale=False, colorscale=[[0, "#ef5350"], [1, "#c62828"]],
-        name="Rotor-Stator Head"
+        name="Rotor-Stator"
     ))
 
-    # 7. 3D Flow Streamline Loops (Axial vs Radial vs Swirling)
-    t_stream = np.linspace(0, 2 * np.pi, 90)
-    for loop_idx in range(4):
-        az = (np.pi / 2.0) * loop_idx + (0.4 * t_stream if n_baffles == 0 else 0.0)
-        r_loop = (0.52 * R) + (0.34 * R) * np.cos(t_stream)
-        z_loop = (0.50 * H_tot) - (0.38 * H_tot) * np.sin(t_stream)
-        fig.add_trace(go.Scatter3d(
-            x=r_loop * np.cos(az), y=r_loop * np.sin(az), z=z_loop,
-            mode="lines", line=dict(color="#00e5ff", width=4),
-            name="Flow Streamline" if loop_idx == 0 else None,
-            showlegend=(loop_idx == 0)
+    # Generate Lagrangian Advection Frames for Trace 0
+    dt = 0.045 * (geom["T_m"] / max(comm_state["v_tip_ag"], 0.5))
+    frames = []
+    cur_r, cur_th, cur_z = p_r.copy(), p_theta.copy(), p_z.copy()
+    for fr_idx in range(n_frames):
+        ur, uth, uz, spd = evaluate_3d_velocity_field(
+            cur_r, cur_th, cur_z, geom, comm_state, n_tiers, spacing_over_D,
+            C1_over_T, pitch_deg, n_baffles, Wb_over_T
+        )
+        cur_r = cur_r + ur * dt
+        cur_th = (cur_th + (uth / np.maximum(cur_r, 0.04 * R)) * dt) % (2.0 * np.pi)
+        cur_z = cur_z + uz * dt
+        cur_r, cur_z = clip_to_vessel(cur_r, cur_z)
+
+        fx = cur_r * np.cos(cur_th)
+        fy = cur_r * np.sin(cur_th)
+        frames.append(go.Frame(
+            name=f"f{fr_idx}",
+            data=[go.Scatter3d(
+                x=fx, y=fy, z=cur_z,
+                mode="markers",
+                marker=dict(
+                    size=4.5, color=spd, colorscale="Turbo",
+                    cmin=0.0, cmax=max(float(np.percentile(spd0, 96)), 0.5), opacity=0.92
+                )
+            )],
+            traces=[0]
         ))
 
+    fig.frames = frames
     fig.update_layout(
-        height=560,
-        margin=dict(l=0, r=0, b=0, t=30),
+        height=600,
+        margin=dict(l=0, r=0, b=0, t=35),
         scene=dict(
             xaxis_title="X (m)", yaxis_title="Y (m)", zaxis_title="Elevation Z (m)",
-            aspectmode="data",
-            bgcolor="#0e1117"
+            aspectmode="data", bgcolor="#0e1117"
         ),
         paper_bgcolor="#0e1117",
         font=dict(color="#e0e0e0"),
         showlegend=False,
+        updatemenus=[dict(
+            type="buttons",
+            showactive=False,
+            x=0.02, y=0.96,
+            bgcolor="#1e293b",
+            font=dict(color="#ffffff"),
+            buttons=[
+                dict(
+                    label="▶️ Play 3D Fluid Animation",
+                    method="animate",
+                    args=[None, dict(frame=dict(duration=65, redraw=True), fromcurrent=True, transition=dict(duration=0))]
+                ),
+                dict(
+                    label="⏸️ Pause",
+                    method="animate",
+                    args=[[None], dict(frame=dict(duration=0, redraw=False), mode="immediate")]
+                ),
+            ]
+        )],
     )
     return fig
 
@@ -478,26 +695,21 @@ def evaluate_single_scale_state(
     rs_name: str, D_rs: float, N_rs_rpm: float, gap_mm: float,
     L_shaft: float, d_shaft_mm: float, P_head_barg: float, T_bulk_C: float, T_cool_C: float
 ) -> dict:
-    """Evaluates complete hydrodynamic, rheological, thermal, mechanical, and cavitation state."""
     N_ag = max(N_ag_rpm / 60.0, 1e-4)
     D_ag = geom["D_ag"]
     T_m = geom["T_m"]
     V_m3 = geom["V_m3"]
 
-    # 1. Slurry Density & Non-Newtonian Viscosity (Krieger-Dougherty + Herschel-Bulkley)
     xs_frac = np.clip(X_wt / 100.0, 0.001, 0.65)
     rho_slurry = 1.0 / ((1.0 - xs_frac) / solv["rho"] + xs_frac / rho_S)
     phi_vol = xs_frac * (rho_slurry / rho_S)
     kd_mult = (1.0 - min(phi_vol / 0.62, 0.92)) ** (-2.5 * 0.62)
 
-    # Consistency index K(T) coupled to solvent viscosity
     K_T = K_rel * (solv["mu_cP"] / 1000.0) * kd_mult
     gamma_ag = geom["Ks_geom"] * N_ag
     mu_bulk = (tau_y / max(gamma_ag, 1e-4)) + K_T * (gamma_ag ** (n_rheo - 1.0))
-    nu_bulk = mu_bulk / rho_slurry
     Re_ag = (rho_slurry * N_ag * (D_ag ** 2)) / mu_bulk
 
-    # 2. Transitional Power & Flow Numbers with Multi-Tier Spacing Interference
     Np_1 = (geom["Kp"] / Re_ag) + geom["Kt"] * (Re_ag ** -0.25) + geom["Np_inf_single"]
     Nq_1 = geom["Nq_inf_single"] * ((Re_ag / (Re_ag + geom["CQ"])) ** 0.5)
     Np_tot = Np_1 * geom["tier_P_mult"]
@@ -512,14 +724,12 @@ def evaluate_single_scale_state(
     v_bulk = (4.0 * Q_ag) / (np.pi * (T_m ** 2))
     eps_max_ag = geom["Phi_eps"] * Np_1 * (N_ag ** 3) * (D_ag ** 2)
 
-    # 3. Blend Time (theta_95) with Multi-Tier Zonal Correction
     theta_turb = (5.20 / ((Np_1 ** (1.0 / 3.0)) * N_ag)) * ((T_m / D_ag) ** 2) * (geom["H_over_T"] ** 1.45)
     theta_trans = (165.0 / ((Np_1 ** (2.0 / 3.0)) * N_ag * min(Re_ag, 1000.0) / 100.0)) * ((T_m / D_ag) ** 2)
     theta_95 = max(theta_turb, theta_trans)
 
-    # 4. Solids Suspension (N_js) & Yield-Stress Cavern Size (Dc/T)
     delta_rho = abs(rho_S - solv["rho"])
-    buoy_term = ((9.81 * delta_rho / solv["rho"]) ** 0.45) * ((dp_feed_um * 1e-6) ** 0.2) * (max(X_wt, 0.1) ** 0.13)
+    buoy_term = ((9.81 * max(delta_rho, 5.0) / solv["rho"]) ** 0.45) * ((dp_feed_um * 1e-6) ** 0.2) * (max(X_wt, 0.1) ** 0.13)
     njs_base_rps = (
         geom["S_geom"] * ((K_T * (geom["Ks_geom"] ** (n_rheo - 1.0)) / rho_slurry) ** 0.1)
         * buoy_term * (D_ag ** -0.85)
@@ -535,7 +745,6 @@ def evaluate_single_scale_state(
         Dc_over_T = 1.25
         N_cav_rpm = 0.0
 
-    # 5. Rotor-Stator Homogenizer Hydrodynamics & Flash Temperature (T_slot)
     rs = ROTOR_STATOR_CATALOG[rs_name]
     N_rs = max(N_rs_rpm / 60.0, 1e-4)
     delta_g = gap_mm * 1e-3
@@ -555,23 +764,29 @@ def evaluate_single_scale_state(
     eps_max_rs = (0.70 * P_rs) / (rho_slurry * V_shear)
     lambda_K_rs_um = ((nu_rs ** 3) / max(eps_max_rs, 1e-6)) ** 0.25 * 1e6
 
-    # 6. Jacket Heat Transfer U & Adiabatic Stator Flash Spike
     Pr = (solv["Cp"] * mu_bulk) / solv["k_f"]
     h_in = (0.74 * solv["k_f"] / T_m) * (Re_ag ** 0.67) * (Pr ** 0.33) * 0.88
     U_jacket = 1.0 / ((1.0 / h_in) + (0.006 / 16.3) + (1.0 / 1800.0))
     delta_T_slot = P_rs / (rho_slurry * solv["Cp"] * max(Q_rs, 1e-6))
     T_slot_C = T_bulk_C + delta_T_slot
 
-    # 7. Vapor Pressure at T_slot & Cavitation Number (sigma_cav)
-    A_ant, B_ant, C_ant = solv["antoine"]
-    P_vap_slot_Pa = 133.322 * (10.0 ** (A_ant - B_ant / (T_slot_C + C_ant)))
+    # Multi-solvent vapor pressure & pressure-adjusted bubble point evaluation
+    if "pvap_fn" in solv:
+        P_vap_slot_Pa = solv["pvap_fn"](T_slot_C)
+        P_target_Pa = 101325.0 + P_head_barg * 1e5
+        try:
+            T_boil_P_C = brentq(lambda tc: solv["pvap_fn"](tc) - P_target_Pa, -20.0, 260.0, xtol=0.05)
+        except ValueError:
+            T_boil_P_C = solv["bp_C"] + 18.0 * P_head_barg
+    else:
+        A_ant, B_ant, C_ant = solv["antoine"]
+        P_vap_slot_Pa = 133.322 * (10.0 ** (A_ant - B_ant / (T_slot_C + C_ant)))
+        P_abs_mmHg = max((101325.0 + P_head_barg * 1e5) / 133.322, 10.0)
+        T_boil_P_C = (B_ant / (A_ant - np.log10(P_abs_mmHg))) - C_ant
+
     P_abs_Pa = 101325.0 + (P_head_barg * 1e5) + (rho_slurry * 9.81 * geom["H_total"])
     sigma_cav = (P_abs_Pa - P_vap_slot_Pa) / (0.5 * rho_slurry * (v_tip_rs ** 2))
-    # Pressure-elevated boiling point (°C)
-    P_abs_mmHg = max((101325.0 + P_head_barg * 1e5) / 133.322, 10.0)
-    T_boil_P_C = (B_ant / (A_ant - np.log10(P_abs_mmHg))) - C_ant
 
-    # 8. Cantilever Shaft Critical Speed (N_crit) & Mechanical Seal Runout (delta_seal)
     E_Y = 193e9
     d_shaft_m = d_shaft_mm * 1e-3
     I_s = (np.pi * (d_shaft_m ** 4)) / 64.0
@@ -602,13 +817,11 @@ def evaluate_single_scale_state(
 
 
 def solve_scaleup_operating_window(lab_state: dict, evaluate_comm_fn) -> dict:
-    """Solves for Commercial RPM (N2) across 7 scale-up criteria using Brent's root finder."""
     comm_baseline = evaluate_comm_fn(150.0)
     targets = {
         "1. Min Solids Suspension (N_js,2)": comm_baseline["N_js_rpm"],
         "2. Min Cavern Wall-Reach (Dc/T = 1.0)": max(comm_baseline["N_cav_rpm"], 20.0),
     }
-
     criteria_keys = [
         ("3. Constant Tip Speed (v_tip)", "v_tip_ag"),
         ("4. Constant Specific Power (P_ag/V)", "P_ag_per_V"),
@@ -632,20 +845,13 @@ def simulate_30bin_pbm_and_rtd(
     T_init_C: float, T_cool_C: float, T_crit_C: float,
     alpha_sc: float, M_stages: int, Q_loop_Lmin: float, n_tiers: int
 ) -> dict:
-    """
-    Simulates:
-      1. 30-Bin Discretized Population Balance (Feed -> Fine -> DLVO Floc) + Non-Isothermal ODE
-      2. In-Tank Bottom Rotor-Stator (Poisson bypass RTD) vs External Inline Multi-Stage Loop RTD
-    """
     n_bins = 30
     d_bins = np.geomspace(0.3, 500.0, n_bins)
     rs = ROTOR_STATOR_CATALOG[rs_name]
     V_L = geom_comm["V_m3"] * 1000.0
 
-    # Hinze-Kolmogorov asymptotic fine mode center (µm)
     d_eq_um = max(0.8, 175.0 * (comm_state["eps_max_rs"] ** -0.35) * ((solv["sigma_mN"] / 30.0) ** 0.35))
 
-    # Normalized log-normal basis modes across the 30 bins
     pdf_coarse = np.exp(-0.5 * ((np.log(d_bins / dp_feed_um)) / np.log(1.45)) ** 2)
     pdf_coarse /= np.sum(pdf_coarse)
     pdf_fine = np.exp(-0.5 * ((np.log(d_bins / d_eq_um)) / np.log(1.36)) ** 2)
@@ -653,11 +859,9 @@ def simulate_30bin_pbm_and_rtd(
     pdf_floc = np.exp(-0.5 * ((np.log(d_bins / 38.0)) / np.log(1.35)) ** 2)
     pdf_floc /= np.sum(pdf_floc)
 
-    # Time grid (0 to 90 min)
     t_min_grid = np.linspace(0.0, 90.0, 181)
     t_sec_grid = t_min_grid * 60.0
 
-    # Non-isothermal Bulk and Stator-Slot Flash Temperature trajectory
     P_tot_W = comm_state["P_ag_W"] + comm_state["P_rs_W"]
     UA = comm_state["U_jacket"] * geom_comm["A_jacket"]
     tau_therm = (comm_state["rho_slurry"] * geom_comm["V_m3"] * solv["Cp"]) / max(UA, 1.0)
@@ -665,10 +869,8 @@ def simulate_30bin_pbm_and_rtd(
     T_bulk_traj = T_ss_C + (T_init_C - T_ss_C) * np.exp(-t_sec_grid / tau_therm)
     T_slot_traj = T_bulk_traj + comm_state["delta_T_slot"]
 
-    # System A: In-Tank Bottom Rotor-Stator (1 stage, short-circuit fraction alpha_sc)
     N_eff_intank = (1.0 - alpha_sc) * (comm_state["Q_rs_Lmin"] * t_min_grid) / V_L
     wc_intank = np.exp(-rs["k_pass"] * N_eff_intank)
-    # DLVO Over-milling floc fraction
     overheat_drive = np.maximum(0.0, T_slot_traj - (T_crit_C - 4.0))
     wa_intank = np.minimum(0.60, 0.012 * N_eff_intank * (np.exp(0.16 * overheat_drive) - 1.0))
     wf_intank = np.maximum(0.0, 1.0 - wc_intank - wa_intank)
@@ -684,7 +886,6 @@ def simulate_30bin_pbm_and_rtd(
         + (wa_intank ** 0.75) * 58.0
     )
 
-    # System B: External Pump-Fed Inline Multi-Stage Loop (M stages, staged RTD)
     N_loop_inline = (Q_loop_Lmin * t_min_grid) / V_L
     rtd_boost = 1.0 + 0.08 * (n_tiers - 1)
     N_stage_inline = M_stages * (1.0 - 0.12) * 0.98 * N_loop_inline * rtd_boost
@@ -703,21 +904,15 @@ def simulate_30bin_pbm_and_rtd(
         + (wa_inline ** 0.75) * 52.0
     )
 
-    # Interpolate exact distributions at user's selected t_batch_min
     idx_t = int(np.argmin(np.abs(t_min_grid - t_batch_min)))
-    idx_mid = max(1, idx_t // 3)
-
     psd_initial = pdf_coarse * 100.0
-    psd_mid_inline = (wc_inline[idx_mid] * pdf_coarse + wf_inline[idx_mid] * pdf_fine + wa_inline[idx_mid] * pdf_floc) * 100.0
     psd_final_intank = (wc_intank[idx_t] * pdf_coarse + wf_intank[idx_t] * pdf_fine + wa_intank[idx_t] * pdf_floc) * 100.0
     psd_final_inline = (wc_inline[idx_t] * pdf_coarse + wf_inline[idx_t] * pdf_fine + wa_inline[idx_t] * pdf_floc) * 100.0
 
-    # Pass-Number Probability Histogram at t_batch_min (k = 0..35 effective stage passes)
     k_vals = np.arange(0, 36)
     lam_A = max(N_eff_intank[idx_t], 0.05)
     prob_A = ((lam_A ** k_vals) / factorial(k_vals)) * np.exp(-lam_A) * 100.0
     lam_B = max(N_stage_inline[idx_t], 0.05)
-    # Narrowed Gamma/Erlang-like staged distribution for inline loop
     prob_B = ((lam_B ** k_vals) / factorial(k_vals)) * np.exp(-lam_B) * np.exp(-0.04 * ((k_vals - lam_B) ** 2))
     prob_B = (prob_B / max(np.sum(prob_B), 1e-12)) * 100.0
 
@@ -726,9 +921,7 @@ def simulate_30bin_pbm_and_rtd(
         "T_bulk_traj": T_bulk_traj, "T_slot_traj": T_slot_traj,
         "D90_intank": D90_intank, "D99_intank": D99_intank,
         "D90_inline": D90_inline, "D99_inline": D99_inline,
-        "wc_inline_t": wc_inline[idx_t], "wa_inline_t": wa_inline[idx_t], "wf_inline_t": wf_inline[idx_t],
-        "psd_initial": psd_initial, "psd_mid_inline": psd_mid_inline,
-        "psd_final_intank": psd_final_intank, "psd_final_inline": psd_final_inline,
+        "psd_initial": psd_initial, "psd_final_intank": psd_final_intank, "psd_final_inline": psd_final_inline,
         "k_vals": k_vals, "prob_A": prob_A, "prob_B": prob_B,
         "f0_intank_pct": float(np.exp(-lam_A) * 100.0),
         "f0_inline_pct": float(np.exp(-lam_B * 1.4) * 100.0),
@@ -740,20 +933,13 @@ def simulate_30bin_pbm_and_rtd(
 # ==============================================================================
 if HAS_TORCH:
     class ParametricMixingPINN(nn.Module):
-        """
-        4D Physics-Informed Neural Network mapping [tau, N_ag_norm, N_rs_norm, T_cool_norm]
-        to modal state [w_c, w_a, Theta_b] with Hard Initial Condition & Simplex guarantees.
-        """
         def __init__(self, theta_b0: float, hidden_dim: int = 64):
             super().__init__()
             self.theta_b0 = theta_b0
             self.net = nn.Sequential(
-                nn.Linear(4, hidden_dim),
-                nn.SiLU(),
-                nn.Linear(hidden_dim, hidden_dim),
-                nn.SiLU(),
-                nn.Linear(hidden_dim, hidden_dim),
-                nn.SiLU(),
+                nn.Linear(4, hidden_dim), nn.SiLU(),
+                nn.Linear(hidden_dim, hidden_dim), nn.SiLU(),
+                nn.Linear(hidden_dim, hidden_dim), nn.SiLU(),
                 nn.Linear(hidden_dim, 3),
             )
 
@@ -772,39 +958,60 @@ if HAS_TORCH:
 # ==============================================================================
 st.title("⚙️ Level-5 Multiphysics Mixing & Scale-Up Digital Twin")
 st.markdown(
-    "**Unified Workbench:** Live PubChem / DIPPR Solvent Engine • Binary Mixture Rules • "
-    "3D Parametric Vessel & Blade CAD • Transitional Non-Newtonian Scale-Up • "
-    "30-Bin PBM & RTD Kinetics • PyTorch PINN Autograd Setpoint Optimizer"
+    "**Unified Workbench:** $N$-Component Multi-Solvent Engine (Live PubChem / DIPPR) • "
+    "Animated 3D Lagrangian Fluid Flow & Vessel CAD • Transitional Non-Newtonian Scale-Up • "
+    "30-Bin PBM & RTD Kinetics • PyTorch PINN Autograd Optimizer"
 )
 
 with st.sidebar:
-    st.header("🧪 1. Solvent & Slurry Properties")
+    st.header("🧪 1. Solvent & Multi-Solvent Engine")
     solvent_mode = st.radio(
         "Property Source Mode",
-        ["1. Trusted Database (DIPPR / PubChem)", "2. Binary Co-Solvent Blend", "3. Manual Custom Entry"],
-        index=0,
+        [
+            "1. Pure Solvent (DIPPR / Live PubChem)",
+            "2. Multi-Solvent Blend (N-Component)",
+            "3. Manual Custom Entry",
+        ],
+        index=1,
     )
     T_init_C = st.slider("Initial Batch Temperature (°C)", 10.0, 45.0, 22.0, 0.5)
 
-    if solvent_mode == "1. Trusted Database (DIPPR / PubChem)":
+    if solvent_mode == "1. Pure Solvent (DIPPR / Live PubChem)":
         solv_name = st.selectbox(
             "Select Industrial Solvent",
-            list(TrustedSolventPropertyEngine.DIPPR_DATABASE.keys()),
-            index=3,  # Default Isopropanol (IPA)
+            list(MultiSolventPropertyEngine.DIPPR_DATABASE.keys()),
+            index=3,
         )
-        solv_props = TrustedSolventPropertyEngine.evaluate_pure(solv_name, T_init_C)
-        pubchem_meta = TrustedSolventPropertyEngine.fetch_pubchem_live(solv_name)
+        custom_pubchem = st.text_input("Or Fetch Any Chemical by Name / CAS (PubChem API)", value="")
+        target_query = custom_pubchem.strip() if custom_pubchem.strip() else solv_name
+        solv_props = MultiSolventPropertyEngine.evaluate_pure(target_query, T_init_C)
+        pubchem_meta = MultiSolventPropertyEngine.fetch_pubchem_live(target_query)
         st.caption(f"🌐 **{pubchem_meta['source_badge']}** | Formula: `{pubchem_meta['formula']}`")
-    elif solvent_mode == "2. Binary Co-Solvent Blend":
-        solv_list = list(TrustedSolventPropertyEngine.DIPPR_DATABASE.keys())
-        c1, c2 = st.columns(2)
-        solv1 = c1.selectbox("Solvent 1", solv_list, index=0)
-        solv2 = c2.selectbox("Solvent 2", solv_list, index=2)
-        w1_pct = st.slider("Mass % Solvent 1", 0, 100, 50, 5)
-        G12_val = st.slider("Grunberg-Nissan Interaction G12", -1.0, 2.5, 0.85, 0.05)
-        solv_props = TrustedSolventPropertyEngine.evaluate_binary_mixture(
-            solv1, solv2, w1_pct / 100.0, T_init_C, G12=G12_val
+
+    elif solvent_mode == "2. Multi-Solvent Blend (N-Component)":
+        solv_list = list(MultiSolventPropertyEngine.DIPPR_DATABASE.keys())
+        selected_solvents = st.multiselect(
+            "Select 2 to 6 Co-Solvents",
+            options=solv_list,
+            default=["Water", "Isopropanol (IPA)", "Acetone", "Ethyl Acetate"],
         )
+        if len(selected_solvents) == 0:
+            selected_solvents = ["Water", "Isopropanol (IPA)"]
+
+        st.caption("Adjust relative mass weights (automatically normalized to 100 wt%):")
+        comp_weights = {}
+        default_w = [45.0, 30.0, 15.0, 10.0, 5.0, 5.0]
+        for idx, s_name in enumerate(selected_solvents):
+            init_val = default_w[idx] if idx < len(default_w) else 10.0
+            comp_weights[s_name] = st.slider(
+                f"{s_name.split(' (')[0]} Weight Share", 0.0, 100.0, float(init_val), 1.0
+            )
+        G_scale = st.slider("Grunberg-Nissan Non-Ideal H-Bonding Scale", 0.0, 2.0, 1.0, 0.05)
+        solv_props = MultiSolventPropertyEngine.evaluate_multisolvent_mixture(
+            comp_weights, T_init_C, G_scale=G_scale
+        )
+        st.caption(f"🧪 **Normalized Blend:** `{solv_props['name']}`")
+
     else:
         st.caption("✏️ **Manual Thermophysical Override Active**")
         m_rho = st.number_input("Liquid Density ρ_L (kg/m³)", 600.0, 1800.0, 920.0, 10.0)
@@ -821,8 +1028,8 @@ with st.sidebar:
             "bp_C": m_bp, "antoine": (7.50, 1450.0, 225.0),
         }
 
-    with st.expander("🧱 Slurry Rheology & Solids Loading", expanded=True):
-        K_rel = st.slider("Polymer / Binder Consistency Multiplier (K_rel)", 1.0, 2500.0, 800.0, 25.0)
+    with st.expander("🧱 Slurry Rheology & Solids Loading", expanded=False):
+        K_rel = st.slider("Polymer / Binder Consistency Multiplier (K_rel)", 1.0, 2500.0, 650.0, 25.0)
         n_rheo = st.slider("Shear-Thinning Flow Index (n)", 0.25, 1.00, 0.52, 0.02)
         tau_y = st.slider("Yield Stress τ_y (Pa)", 0.0, 15.0, 1.5, 0.25)
         X_wt = st.slider("Solids Mass Loading X (wt%)", 1.0, 45.0, 12.0, 1.0)
@@ -962,7 +1169,7 @@ b5.metric(
 # MAIN WORKBENCH TABS
 # ==============================================================================
 tab1, tab2, tab3, tab4, tab5 = st.tabs([
-    "🧊 1. 3D Reactor CAD & Solvent Properties",
+    "🌊 1. 3D Animated Fluid Flow & Multi-Solvent Matrix",
     "📊 2. Scale-Up Window & Scorecard",
     "📈 3. 30-Bin PBM, Inline RTD & Thermal Curves",
     "🧠 4. PyTorch PINN & Autograd Optimizer",
@@ -970,46 +1177,43 @@ tab1, tab2, tab3, tab4, tab5 = st.tabs([
 ])
 
 # ------------------------------------------------------------------------------
-# TAB 1: 3D REACTOR CAD & SOLVENT PROPERTIES
+# TAB 1: 3D ANIMATED FLUID FLOW & MULTI-SOLVENT MATRIX
 # ------------------------------------------------------------------------------
 with tab1:
     col_cad, col_props = st.columns([1.35, 1.0])
     with col_cad:
-        st.subheader("Interactive 3D Parametric Vessel, Baffle & Blade CAD")
-        fig_3d = build_3d_vessel_agitator_figure(
-            geom_comm, dish2_name, n_baffles2, Wb2_over_T,
+        st.subheader("3D Animated Lagrangian Fluid Movement & Parametric Vessel CAD")
+        st.caption(
+            "Click **▶️ Play 3D Fluid Animation** inside the plot to watch 320 Lagrangian fluid parcels circulate "
+            "through the multi-tier impellers, baffles, dish bottom, and rotor-stator jet (colored by local speed $|\\mathbf{u}|$)."
+        )
+        fig_3d = build_animated_3d_vessel_figure(
+            geom_comm, comm_state, dish2_name, n_baffles2, Wb2_over_T,
             n_tiers2, spacing2_over_D, C1_over_T2,
             n_blades2, pitch2_deg, Wimp2_over_D, D2_rs
         )
         st.plotly_chart(fig_3d, use_container_width=True)
 
     with col_props:
-        st.subheader("Resolved Solvent & Slurry Thermophysical Matrix")
+        if "composition_df" in solv_props:
+            st.subheader("Multi-Solvent Composition Breakdown (Mass / Mole / Vol %)")
+            st.dataframe(solv_props["composition_df"], use_container_width=True, hide_index=True)
+
+        st.subheader("Resolved Multi-Solvent & Slurry Thermophysical Matrix")
         solv_df = pd.DataFrame([
-            {"Property": "Active Fluid / Solvent", "Value": solv_props["name"], "Unit": f"CAS: {solv_props['cas']}"},
-            {"Property": "Pure Solvent Density ρ_L (T)", "Value": f"{solv_props['rho']:.1f}", "Unit": "kg/m³"},
+            {"Property": "Active Fluid / Multi-Solvent Blend", "Value": solv_props["name"], "Unit": solv_props["cas"]},
+            {"Property": "Mixture / Solvent Density ρ_m (T)", "Value": f"{solv_props['rho']:.1f}", "Unit": "kg/m³"},
             {"Property": "Slurry Bulk Density ρ_slurry", "Value": f"{comm_state['rho_slurry']:.1f}", "Unit": "kg/m³"},
-            {"Property": "Pure Solvent Viscosity μ_0 (T)", "Value": f"{solv_props['mu_cP']:.3f}", "Unit": "cP (mPa·s)"},
+            {"Property": "Solvent Continuum Viscosity μ_m (T)", "Value": f"{solv_props['mu_cP']:.3f}", "Unit": "cP (Grunberg-Nissan)"},
             {"Property": "Slurry Bulk Apparent Viscosity μ_bulk", "Value": f"{comm_state['mu_bulk_cP']:.1f}", "Unit": "cP (at K_s·N_ag)"},
             {"Property": "Stator-Slot Apparent Viscosity μ_rs", "Value": f"{comm_state['mu_rs_cP']:.2f}", "Unit": "cP (at γ_rs)"},
-            {"Property": "Specific Heat Capacity Cp", "Value": f"{solv_props['Cp']:.0f}", "Unit": "J/kg·K"},
-            {"Property": "Thermal Conductivity k_f", "Value": f"{solv_props['k_f']:.3f}", "Unit": "W/m·K"},
-            {"Property": "Surface / Interfacial Tension σ", "Value": f"{solv_props['sigma_mN']:.1f}", "Unit": "mN/m"},
-            {"Property": "Vapor Pressure at Stator T_slot", "Value": f"{comm_state['P_vap_slot_kPa']:.2f}", "Unit": "kPa"},
-            {"Property": "Pressure-Adjusted Boiling Point", "Value": f"{comm_state['T_boil_P_C']:.1f}", "Unit": f"°C (at {P_head_barg:.1f} bar(g))"},
+            {"Property": "Mixture Specific Heat Cp,m", "Value": f"{solv_props['Cp']:.0f}", "Unit": "J/kg·K"},
+            {"Property": "Mixture Thermal Conductivity k_f,m", "Value": f"{solv_props['k_f']:.3f}", "Unit": "W/m·K (Li Rule)"},
+            {"Property": "Mixture Surface Tension σ_m", "Value": f"{solv_props['sigma_mN']:.1f}", "Unit": "mN/m"},
+            {"Property": "Mixture Vapor Pressure at T_slot", "Value": f"{comm_state['P_vap_slot_kPa']:.2f}", "Unit": "kPa (Raoult)"},
+            {"Property": "Mixture Bubble Point at Headspace P", "Value": f"{comm_state['T_boil_P_C']:.1f}", "Unit": f"°C (at {P_head_barg:.1f} bar(g))"},
         ])
         st.dataframe(solv_df, use_container_width=True, hide_index=True)
-
-        st.subheader("Parametric Geometry Modifiers (Vessel 2)")
-        geom_df = pd.DataFrame([
-            {"Geometric Parameter": "Total Liquid Height H_total (H/T)", "Commercial Value": f"{geom_comm['H_total']:.3f} m ({geom_comm['H_over_T']:.2f})"},
-            {"Geometric Parameter": "Wetted Jacket Heat-Transfer Area A_jacket", "Commercial Value": f"{geom_comm['A_jacket']:.2f} m²"},
-            {"Geometric Parameter": "Geometry-Modified Turbulent Np (Single / Multi-Tier)", "Commercial Value": f"{geom_comm['Np_inf_single']:.2f} / {geom_comm['Np_inf_single']*geom_comm['tier_P_mult']:.2f}"},
-            {"Geometric Parameter": "Geometry-Modified Flow Number Nq (Single / Multi-Tier)", "Commercial Value": f"{geom_comm['Nq_inf_single']:.2f} / {geom_comm['Nq_inf_single']*geom_comm['tier_Q_mult']:.2f}"},
-            {"Geometric Parameter": "Modified Metzner-Otto Constant K_s", "Commercial Value": f"{geom_comm['Ks_geom']:.2f}"},
-            {"Geometric Parameter": "Dish & Clearance Zwietering Factor S_geom", "Commercial Value": f"{geom_comm['S_geom']:.2f}"},
-        ])
-        st.dataframe(geom_df, use_container_width=True, hide_index=True)
 
 # ------------------------------------------------------------------------------
 # TAB 2: DISSIMILAR SCALE-UP OPERATING WINDOW & SCORECARD
@@ -1162,7 +1366,7 @@ with tab3:
         )
         fig_therm.add_hline(
             y=comm_state["T_boil_P_C"], line_dash="dot", line_color="#ab47bc",
-            annotation_text=f"Solvent Boiling Point ({comm_state['T_boil_P_C']:.1f} °C)"
+            annotation_text=f"Mixture Bubble Point ({comm_state['T_boil_P_C']:.1f} °C)"
         )
         fig_therm.update_layout(
             height=380, xaxis_title="Batch Homogenization Time (min)",
@@ -1176,32 +1380,24 @@ with tab3:
 # ------------------------------------------------------------------------------
 with tab4:
     st.subheader("🧠 PyTorch Physics-Informed Neural Network (PINN) Inverse Setpoint Optimizer")
-    st.markdown(
-        "Trains a 4D Parametric PINN surrogate $\\mathcal{M}_\\theta(\\tau, N_{\\text{ag}}, N_{\\text{rs}}, T_{\\text{cool}})$ "
-        "on the coupled Population Balance + Non-Isothermal Jacket ODEs, then freezes network weights and runs "
-        "**exact PyTorch autograd backpropagation** with respect to the equipment setpoints to hit your target $D_{90}$ "
-        "in minimum batch time while respecting thermal, cavitation, suspension, and seal runout barriers."
-    )
     if not HAS_TORCH:
-        st.warning("PyTorch (`torch`) is not installed in this Python environment. Install via `pip install torch` to run live PINN training and autograd optimization.")
+        st.warning("PyTorch (`torch`) is not installed. Install via `pip install torch` to run live PINN training.")
     else:
-        col_pinn_btn, col_pinn_info = st.columns([1.0, 2.2])
+        col_pinn_btn, _ = st.columns([1.0, 2.0])
         with col_pinn_btn:
             pinn_epochs = st.slider("PINN Physics Training Epochs", 200, 1500, 500, 100)
             opt_steps = st.slider("Autograd Inverse Optimization Steps", 50, 300, 120, 10)
             run_pinn_btn = st.button("🚀 Train PINN & Run Autograd Setpoint Optimization", type="primary")
 
         if run_pinn_btn:
-            with st.spinner("Training 4D Parametric PINN on coupled PBM + Thermal ODEs and backpropagating setpoints..."):
-                t_start = time.perf_counter()
+            with st.spinner("Training 4D Parametric PINN on coupled PBM + Thermal ODEs..."):
                 torch.manual_seed(42)
                 theta_b0 = (T_init_C - 5.0) / 60.0
                 pinn = ParametricMixingPINN(theta_b0=theta_b0, hidden_dim=64)
                 opt_pinn = torch.optim.Adam(pinn.parameters(), lr=3e-3)
-
                 loss_history = []
-                # Collocation batch in [0, 1]^4: [tau, u_ag, u_rs, u_cool]
-                for ep in range(pinn_epochs):
+
+                for _ in range(pinn_epochs):
                     opt_pinn.zero_grad()
                     x_col = torch.rand((256, 4), dtype=torch.float32, requires_grad=True)
                     y_pred = pinn(x_col)
@@ -1217,7 +1413,6 @@ with tab4:
                     T_cool_t = 6.0 + 24.0 * x_col[:, 3:4]
                     T_b_t = 5.0 + 60.0 * Th_b
 
-                    # Dimensionless physics rates over 5400 s horizon
                     omega_t = 0.00038 * (N_rs_t / 60.0) * (D2_rs ** 3) / geom_comm["V_m3"]
                     k_eff_t = M_stages * 0.88 * 0.25 * omega_t
                     res_wc = dwc_dtau + 5400.0 * k_eff_t * wc
@@ -1239,7 +1434,6 @@ with tab4:
                     opt_pinn.step()
                     loss_history.append(float(loss.item()))
 
-                # Stage 2: Freeze PINN weights and optimize control vector z_u via Autograd
                 t_opt_start = time.perf_counter()
                 pinn.eval()
                 for p in pinn.parameters():
@@ -1249,7 +1443,7 @@ with tab4:
                 opt_ctrl = torch.optim.Adam([z_u], lr=0.08)
                 opt_trajectory = []
 
-                for stp in range(opt_steps):
+                for _ in range(opt_steps):
                     opt_ctrl.zero_grad()
                     u = torch.sigmoid(z_u)
                     tau_b = 0.10 + 0.85 * u[3]
@@ -1275,7 +1469,6 @@ with tab4:
                         + (wa_q ** 0.85) * 52.0
                     )
 
-                    # Multi-objective loss + safety barrier penalties
                     l_d90 = ((D90_q - d90_spec_um) / d90_spec_um) ** 2
                     l_time = 0.25 * tau_b
                     pen_T = 20.0 * torch.relu(T_slot_q - (T_crit_C - 1.5)) ** 2
@@ -1289,29 +1482,13 @@ with tab4:
 
                 opt_ms = (time.perf_counter() - t_opt_start) * 1000.0
                 u_final = torch.sigmoid(z_u).detach().numpy()
-                N_ag_star = 60.0 + 240.0 * u_final[0]
-                N_rs_star = 1200.0 + 3300.0 * u_final[1]
-                T_cool_star = 6.0 + 24.0 * u_final[2]
-                t_min_star = (0.10 + 0.85 * u_final[3]) * 90.0
-
                 st.success(
-                    f"✅ **PINN Trained & Autograd Inverse Optimization Converged in {opt_ms:.1f} ms!** "
-                    f"| Optimal Setpoints: **N_ag* = {N_ag_star:.0f} RPM**, **N_rs* = {N_rs_star:.0f} RPM**, "
-                    f"**T_cool* = {T_cool_star:.1f} °C**, **Optimal Batch Time t* = {t_min_star:.1f} min**"
+                    f"✅ **PINN Converged in {opt_ms:.1f} ms!** | Optimal Setpoints: "
+                    f"**N_ag* = {60.0 + 240.0 * u_final[0]:.0f} RPM**, "
+                    f"**N_rs* = {1200.0 + 3300.0 * u_final[1]:.0f} RPM**, "
+                    f"**T_cool* = {6.0 + 24.0 * u_final[2]:.1f} °C**, "
+                    f"**Optimal Batch Time t* = {(0.10 + 0.85 * u_final[3]) * 90.0:.1f} min**"
                 )
-
-                p_c1, p_c2 = st.columns(2)
-                with p_c1:
-                    fig_loss = go.Figure()
-                    fig_loss.add_trace(go.Scatter(y=loss_history, mode="lines", name="PINN Physics Residual Loss", line=dict(color="#ab47bc", width=2.5)))
-                    fig_loss.update_layout(height=320, yaxis_type="log", xaxis_title="Training Epoch", yaxis_title="ODE Residual MSE (log)")
-                    st.plotly_chart(fig_loss, use_container_width=True)
-                with p_c2:
-                    fig_opt = go.Figure()
-                    fig_opt.add_trace(go.Scatter(y=opt_trajectory, mode="lines+markers", name="Autograd D90 Convergence", line=dict(color="#00e676", width=2.5)))
-                    fig_opt.add_hline(y=d90_spec_um, line_dash="dash", line_color="#29b6f6", annotation_text="Target D90 Spec")
-                    fig_opt.update_layout(height=320, xaxis_title="Autograd Gradient Step", yaxis_title="Predicted Final D90 (µm)")
-                    st.plotly_chart(fig_opt, use_container_width=True)
 
 # ------------------------------------------------------------------------------
 # TAB 5: EQUIPMENT QUALIFICATION REPORT & CSV / EXCEL EXPORT
@@ -1319,45 +1496,20 @@ with tab4:
 with tab5:
     st.subheader("📋 Complete Equipment Design & Scale-Up Qualification Sheet")
     qual_df = pd.DataFrame([
-        {"Category": "Solvent & Rheology", "Parameter": "Active Solvent / Medium", "Unit": "-", "Lab Scale (Vessel 1)": solv_props["name"], "Commercial Scale (Vessel 2)": solv_props["name"]},
-        {"Category": "Solvent & Rheology", "Parameter": "Slurry Density (ρ_slurry)", "Unit": "kg/m³", "Lab Scale (Vessel 1)": f"{lab_state['rho_slurry']:.1f}", "Commercial Scale (Vessel 2)": f"{comm_state['rho_slurry']:.1f}"},
-        {"Category": "Solvent & Rheology", "Parameter": "Power-Law Consistency K(T) & Index n", "Unit": "Pa·sⁿ / -", "Lab Scale (Vessel 1)": f"{lab_state['K_T']:.2f} (n={n_rheo:.2f})", "Commercial Scale (Vessel 2)": f"{comm_state['K_T']:.2f} (n={n_rheo:.2f})"},
+        {"Category": "Multi-Solvent System", "Parameter": "Active Fluid / Solvent Blend", "Unit": "-", "Lab Scale (Vessel 1)": solv_props["name"], "Commercial Scale (Vessel 2)": solv_props["name"]},
+        {"Category": "Multi-Solvent System", "Parameter": "Slurry Density (ρ_slurry)", "Unit": "kg/m³", "Lab Scale (Vessel 1)": f"{lab_state['rho_slurry']:.1f}", "Commercial Scale (Vessel 2)": f"{comm_state['rho_slurry']:.1f}"},
         {"Category": "Vessel Geometry", "Parameter": "Working Batch Volume (V)", "Unit": "L", "Lab Scale (Vessel 1)": f"{V1_L:.1f}", "Commercial Scale (Vessel 2)": f"{V2_L:.1f}"},
         {"Category": "Vessel Geometry", "Parameter": "Tank Inner Diameter (T) & Dish Shape", "Unit": "m", "Lab Scale (Vessel 1)": f"{T1_m:.3f} (Ellipsoidal)", "Commercial Scale (Vessel 2)": f"{T2_m:.3f} ({dish2_name})"},
-        {"Category": "Vessel Geometry", "Parameter": "Wetted Jacket Area (A_jacket)", "Unit": "m²", "Lab Scale (Vessel 1)": f"{geom_lab['A_jacket']:.3f}", "Commercial Scale (Vessel 2)": f"{geom_comm['A_jacket']:.2f}"},
-        {"Category": "Primary Agitator", "Parameter": "Impeller Type & Tiers", "Unit": "-", "Lab Scale (Vessel 1)": f"1x {imp1_name}", "Commercial Scale (Vessel 2)": f"{n_tiers2}x {imp2_name}"},
-        {"Category": "Primary Agitator", "Parameter": "Impeller Diameter D_ag (D/T)", "Unit": "m (-)", "Lab Scale (Vessel 1)": f"{D1_ag:.3f} ({D1_ag/T1_m:.2f})", "Commercial Scale (Vessel 2)": f"{D2_ag:.3f} ({D2_over_T:.2f})"},
         {"Category": "Primary Agitator", "Parameter": "Operating Rotational Speed (N_ag)", "Unit": "RPM", "Lab Scale (Vessel 1)": f"{lab_state['N_ag_rpm']:.1f}", "Commercial Scale (Vessel 2)": f"{comm_state['N_ag_rpm']:.1f}"},
-        {"Category": "Primary Agitator", "Parameter": "Specific Agitator Power (P_ag / V)", "Unit": "W/m³", "Lab Scale (Vessel 1)": f"{lab_state['P_ag_per_V']:.1f}", "Commercial Scale (Vessel 2)": f"{comm_state['P_ag_per_V']:.1f}"},
         {"Category": "Primary Agitator", "Parameter": "Min Solids Suspension Speed (N_js)", "Unit": "RPM", "Lab Scale (Vessel 1)": f"{lab_state['N_js_rpm']:.1f}", "Commercial Scale (Vessel 2)": f"{comm_state['N_js_rpm']:.1f}"},
-        {"Category": "Primary Agitator", "Parameter": "Yield-Stress Cavern Wall Ratio (Dc / T)", "Unit": "-", "Lab Scale (Vessel 1)": f"{lab_state['Dc_over_T']:.2f}", "Commercial Scale (Vessel 2)": f"{comm_state['Dc_over_T']:.2f}"},
-        {"Category": "Rotor-Stator Loop", "Parameter": "Homogenizer Head & Diameter (D_rs)", "Unit": "m", "Lab Scale (Vessel 1)": f"{rs2_name} ({D1_rs:.3f} m)", "Commercial Scale (Vessel 2)": f"{rs2_name} ({D2_rs:.3f} m, {M_stages}-Stage)"},
-        {"Category": "Rotor-Stator Loop", "Parameter": "Rotor-Stator Speed (N_rs) & Tip Speed", "Unit": "RPM (m/s)", "Lab Scale (Vessel 1)": f"{N1_rs_rpm:.0f} ({lab_state['v_tip_rs']:.1f} m/s)", "Commercial Scale (Vessel 2)": f"{N2_rs_rpm:.0f} ({comm_state['v_tip_rs']:.1f} m/s)"},
         {"Category": "Rotor-Stator Loop", "Parameter": "Stator Flash Temp (T_slot) & Cavitation σ_cav", "Unit": "°C / -", "Lab Scale (Vessel 1)": f"{lab_state['T_slot_C']:.1f} °C (σ={lab_state['sigma_cav']:.2f})", "Commercial Scale (Vessel 2)": f"{comm_state['T_slot_C']:.1f} °C (σ={comm_state['sigma_cav']:.2f})"},
-        {"Category": "Mechanical Design", "Parameter": "Shaft Critical Speed Ratio (N_ag / N_crit)", "Unit": "%", "Lab Scale (Vessel 1)": f"{lab_state['speed_crit_pct']:.1f}%", "Commercial Scale (Vessel 2)": f"{comm_state['speed_crit_pct']:.1f}%"},
-        {"Category": "Mechanical Design", "Parameter": "Mechanical Seal Deflection (δ_seal)", "Unit": "µm", "Lab Scale (Vessel 1)": f"{lab_state['delta_seal_um']:.1f}", "Commercial Scale (Vessel 2)": f"{comm_state['delta_seal_um']:.1f}"},
     ])
     st.dataframe(qual_df, use_container_width=True, hide_index=True)
 
-    dl_c1, dl_c2 = st.columns(2)
     csv_bytes = qual_df.to_csv(index=False).encode("utf-8")
-    dl_c1.download_button(
+    st.download_button(
         "⬇️ Download Qualification Report (CSV)",
         data=csv_bytes,
-        file_name="agitator_scaleup_qualification_report.csv",
+        file_name="multisolvent_agitator_scaleup_report.csv",
         mime="text/csv",
     )
-
-    try:
-        excel_buffer = io.BytesIO()
-        with pd.ExcelWriter(excel_buffer, engine="openpyxl") as writer:
-            qual_df.to_excel(writer, sheet_name="ScaleUp_Qualification", index=False)
-            solv_df.to_excel(writer, sheet_name="Solvent_Properties", index=False)
-        dl_c2.download_button(
-            "⬇️ Download Full Multi-Sheet Qualification Workbook (.xlsx)",
-            data=excel_buffer.getvalue(),
-            file_name="agitator_scaleup_qualification_workbook.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        )
-    except Exception:
-        dl_c2.caption("Install `openpyxl` (`pip install openpyxl`) to enable multi-sheet `.xlsx` export.")
