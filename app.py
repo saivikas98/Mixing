@@ -177,3 +177,86 @@ with tabs[6]:
     flat=pd.DataFrame({'r_m':m['rr'].ravel(),'z_m':m['zz'].ravel(),'ur_m_s':m['ur'].ravel(),'uz_m_s':m['uz'].ravel(),'ut_m_s':m['ut'].ravel(),'velocity_m_s':m['vel'].ravel(),'shear_1_s':m['shear'].ravel(),'stress_Pa':m['tau'].ravel(),'k_m2_s2':m['k'].ravel(),'epsilon_m2_s3':m['eps'].ravel()})
     st.download_button('Download field data CSV',flat.to_csv(index=False).encode(),'gmp_mixer_fields.csv','text/csv')
     st.download_button('Download current inputs CSV',pd.DataFrame([par]).to_csv(index=False).encode(),'gmp_mixer_inputs.csv','text/csv')
+
+# ==================== Mesh independence and OpenFOAM export ====================
+st.divider()
+st.header('Mesh-independent CFD validation and OpenFOAM case export')
+val_tab, of_tab = st.tabs(['Mesh-independence workflow','OpenFOAM solver setup & export'])
+with val_tab:
+    st.markdown('''Use at least three systematically refined meshes with a near-constant refinement ratio. Compare integral and field-based quantities after each case satisfies the same convergence criteria.''')
+    uploaded=st.file_uploader('Upload mesh-study CSV (columns: mesh, cells, h, power_W, torque_Nm, t95_s, max_velocity_m_s, dead_zone_pct)',type='csv')
+    if uploaded:
+        md=pd.read_csv(uploaded)
+    else:
+        base_cells=st.number_input('Coarse mesh cells',10000,100000000,250000,50000,key='base_cells')
+        ratio=st.number_input('Linear refinement ratio r',1.10,3.00,1.50,0.05,key='ref_ratio')
+        md=pd.DataFrame({'mesh':['coarse','medium','fine'],'cells':[base_cells,int(base_cells*ratio**3),int(base_cells*ratio**6)],'h':[1,1/ratio,1/ratio**2],
+            'power_W':[m['P']*0.91,m['P']*0.975,m['P']],'torque_Nm':[m['torque']*0.91,m['torque']*0.975,m['torque']],
+            't95_s':[m['times'][95]*1.13,m['times'][95]*1.04,m['times'][95]],'max_velocity_m_s':[m['vel'].max()*0.88,m['vel'].max()*0.97,m['vel'].max()],
+            'dead_zone_pct':[m['dead']*1.20,m['dead']*1.06,m['dead']]})
+        st.caption('Example values are synthetic placeholders. Replace them with completed OpenFOAM results.')
+    st.dataframe(md,use_container_width=True,hide_index=True)
+    metrics=[c for c in md.columns if c not in ['mesh','cells','h']]
+    rows=[]
+    if len(md)>=3:
+        d=md.sort_values('h',ascending=False).iloc[:3]
+        h1,h2,h3=d['h'].to_numpy(); r21=h1/h2; r32=h2/h3
+        for q in metrics:
+            f1,f2,f3=d[q].to_numpy(float)
+            e21=f2-f1; e32=f3-f2
+            p=np.nan
+            if e21!=0 and e32!=0 and e21/e32>0 and abs(r21-r32)<0.15*r21: p=abs(np.log(abs(e21/e32))/np.log(r21))
+            ea=abs((f3-f2)/f3)*100 if f3 else np.nan
+            gci=1.25*ea/(r32**p-1) if np.isfinite(p) and r32**p>1 else np.nan
+            rows.append([q,p,ea,gci,'PASS' if np.isfinite(gci) and gci<=5 else 'REVIEW'])
+    result=pd.DataFrame(rows,columns=['Metric','Observed order p','Fine-medium change (%)','Fine-grid GCI (%)','Status'])
+    st.dataframe(result.style.format(precision=3),use_container_width=True,hide_index=True)
+    st.markdown('''**Acceptance workflow**
+1. Mesh quality: `checkMesh`; target max non-orthogonality < 65 deg, max skewness < 4 for internal cells, no negative volumes.
+2. Near-wall treatment: document wall functions and y+ target. For standard wall functions target y+ about 30-300; for wall-resolved SST target y+ about 1.
+3. Iterative convergence: scaled residuals typically <1e-5 for U and <1e-4 for k/epsilon, plus stable power, torque, flow number and probes.
+4. Time-step check for transient tracer/sliding mesh: repeat with half deltaT; require t95 change <=5%.
+5. Grid convergence: report fine-medium change and Roache GCI for power, torque, t95, maximum velocity and dead-zone fraction.
+6. Experimental validation: compare torque/power and conductivity t95 at minimum, nominal and maximum fill. Predefine error bands, commonly +/-10% for power and +/-15% for blend time during development.''')
+    st.download_button('Download mesh-study template',md.to_csv(index=False).encode(),'mesh_independence_template.csv','text/csv')
+
+with of_tab:
+    of_version=st.selectbox('OpenFOAM family',['OpenFOAM Foundation v13/v14','OpenCFD v2312/v2406'])
+    solver=st.selectbox('Flow solver',['simpleFoam (steady MRF)','pimpleFoam (transient MRF/sliding mesh)'])
+    turb=st.selectbox('Turbulence model',['kOmegaSST','kEpsilon','laminar'])
+    stl_mode=st.checkbox('I will add vessel.stl and impeller.stl to constant/triSurface',value=True)
+    st.markdown('The exported case is a configurable template. Geometry-specific cellZone and faceZone creation must be checked in ParaView before solving.')
+    if st.button('Build OpenFOAM case ZIP',type='primary'):
+        import tempfile, os, pathlib, zipfile
+        root=pathlib.Path(tempfile.mkdtemp())/'bottomMountMixer'
+        for p in ['0','constant/triSurface','system','postProcessing','validation']: (root/p).mkdir(parents=True,exist_ok=True)
+        header='FoamFile\n{\n    format ascii;\n    class dictionary;\n    object PLACEHOLDER;\n}\n'
+        (root/'README.md').write_text(f'''# Bottom-mount GMP mixer OpenFOAM template\nSelected: {of_version}; {solver}; {turb}.\n\n1. Put watertight vessel.stl and impeller.stl in constant/triSurface.\n2. Edit snappyHexMeshDict locations and rotating-zone geometry.\n3. Run Allrun.\n4. Verify cellZone rotatingZone in ParaView.\n5. Run steady flow first, then transient scalar injection.\n6. Populate validation/meshStudy.csv and upload it in the Streamlit mesh workflow.\n''')
+        (root/'Allrun').write_text('''#!/bin/sh\ncd "${0%/*}" || exit 1\nblockMesh\nsurfaceFeatureExtract\nsnappyHexMesh -overwrite\ncheckMesh | tee log.checkMesh\ntopoSet\ncheckMesh | tee log.checkMesh.final\n'''+('simpleFoam | tee log.simpleFoam\n' if solver.startswith('simple') else 'pimpleFoam | tee log.pimpleFoam\n'))
+        (root/'Allclean').write_text('#!/bin/sh\nfoamListTimes -rm\nrm -rf constant/polyMesh log.* processor* postProcessing\n')
+        os.chmod(root/'Allrun',0o755);os.chmod(root/'Allclean',0o755)
+        (root/'system/blockMeshDict').write_text('''FoamFile{format ascii;class dictionary;object blockMeshDict;}\nscale 1;\nvertices ((-0.5 -0.5 0)(0.5 -0.5 0)(0.5 0.5 0)(-0.5 0.5 0)(-0.5 -0.5 1)(0.5 -0.5 1)(0.5 0.5 1)(-0.5 0.5 1));\nblocks (hex (0 1 2 3 4 5 6 7) (30 30 40) simpleGrading (1 1 1));\nedges(); boundary (background{type patch;faces((0 4 7 3)(1 2 6 5)(0 1 5 4)(3 7 6 2)(0 3 2 1)(4 5 6 7));}); mergePatchPairs();\n''')
+        (root/'system/surfaceFeatureExtractDict').write_text('''FoamFile{format ascii;class dictionary;object surfaceFeatureExtractDict;}\nvessel.stl { extractionMethod extractFromSurface; extractFromSurfaceCoeffs { includedAngle 150; } writeObj yes; }\nimpeller.stl { extractionMethod extractFromSurface; extractFromSurfaceCoeffs { includedAngle 150; } writeObj yes; }\n''')
+        (root/'system/snappyHexMeshDict').write_text(f'''FoamFile{{format ascii;class dictionary;object snappyHexMeshDict;}}\ncastellatedMesh true; snap true; addLayers false;\ngeometry{{ vessel.stl{{type triSurfaceMesh;name vessel;}} impeller.stl{{type triSurfaceMesh;name impeller;}} rotatingCylinder{{type searchableCylinder;point1 (0 0 {max(C-0.08,0):.4g});point2 (0 0 {min(C+0.08,H):.4g});radius {D*0.65:.4g};}} }}\ncastellatedMeshControls{{maxLocalCells 3000000;maxGlobalCells 6000000;minRefinementCells 10;nCellsBetweenLevels 3;features(("vessel.eMesh" 2)("impeller.eMesh" 3));refinementSurfaces{{vessel{{level(2 3);patchInfo{{type wall;}}}}impeller{{level(3 4);patchInfo{{type wall;}}}}}}refinementRegions{{rotatingCylinder{{mode inside;levels((1E15 3));cellZone rotatingZone;faceZone rotatingZone;cellZoneInside inside;}}}}locationInMesh (0 0 {H*0.7:.4g});allowFreeStandingZoneFaces true;}}\nsnapControls{{nSmoothPatch 5;tolerance 2;nSolveIter 100;nRelaxIter 8;}} addLayersControls{{}} meshQualityControls{{maxNonOrtho 65;maxBoundarySkewness 20;maxInternalSkewness 4;minVol 1e-13;}}\n''')
+        (root/'system/topoSetDict').write_text(f'''FoamFile{{format ascii;class dictionary;object topoSetDict;}}\nactions({{name rotatingCells;type cellSet;action new;source cylinderToCell;sourceInfo{{p1(0 0 {max(C-0.08,0):.4g});p2(0 0 {min(C+0.08,H):.4g});radius {D*0.65:.4g};}}}}{{name rotatingZone;type cellZoneSet;action new;source setToCellZone;sourceInfo{{set rotatingCells;}}}});\n''')
+        omega=2*math.pi*rpm/60
+        (root/'constant/MRFProperties').write_text(f'''MRF1{{cellZone rotatingZone;active yes;nonRotatingPatches (vessel);origin (0 0 {C});axis (0 0 1);omega {omega:.8g};}}\n''')
+        (root/'constant/transportProperties').write_text(f'''FoamFile{{format ascii;class dictionary;object transportProperties;}}\ntransportModel Newtonian;nu [0 2 -1 0 0 0 0] {par['mu']/par['rho']:.8g};\n''')
+        simType='laminar' if turb=='laminar' else 'RAS'
+        ras=('' if turb=='laminar' else f'RAS{{model {turb};turbulence on;printCoeffs on;}}')
+        (root/'constant/turbulenceProperties').write_text(f'''FoamFile{{format ascii;class dictionary;object turbulenceProperties;}}\nsimulationType {simType};\n{ras}\n''')
+        for name,dim,val,bcs in [('U','[0 1 -1 0 0 0 0]','uniform (0 0 0)','vessel{type noSlip;} impeller{type noSlip;}'),('p','[0 2 -2 0 0 0 0]','uniform 0','vessel{type zeroGradient;} impeller{type zeroGradient;}'),('k','[0 2 -2 0 0 0 0]','uniform 1e-4','vessel{type kqRWallFunction;value uniform 1e-4;} impeller{type kqRWallFunction;value uniform 1e-4;}'),('epsilon','[0 2 -3 0 0 0 0]','uniform 1e-4','vessel{type epsilonWallFunction;value uniform 1e-4;} impeller{type epsilonWallFunction;value uniform 1e-4;}'),('omega','[0 0 -1 0 0 0 0]','uniform 1','vessel{type omegaWallFunction;value uniform 1;} impeller{type omegaWallFunction;value uniform 1;}'),('s','[0 0 0 0 0 0 0]','uniform 0','vessel{type zeroGradient;} impeller{type zeroGradient;}')]:
+            (root/f'0/{name}').write_text(f'''FoamFile{{format ascii;class vol{name=='U' and 'Vector' or 'Scalar'}Field;object {name};}}\ndimensions {dim};internalField {val};boundaryField{{{bcs}}}\n''')
+        app='simpleFoam' if solver.startswith('simple') else 'pimpleFoam'
+        (root/'system/controlDict').write_text(f'''FoamFile{{format ascii;class dictionary;object controlDict;}}\napplication {app};startFrom startTime;startTime 0;stopAt endTime;endTime {200 if app=='simpleFoam' else 20};deltaT {0.001 if app=='pimpleFoam' else 1};writeControl timeStep;writeInterval {100 if app=='simpleFoam' else 500};purgeWrite 0;writeFormat binary;runTimeModifiable true;\nfunctions{{forces{{type forces;libs ("libforces.so");patches (impeller);rho rhoInf;rhoInf {rho};CofR (0 0 {C});writeControl timeStep;writeInterval 10;}} fieldMinMax{{type fieldMinMax;libs ("libfieldFunctionObjects.so");fields (U k epsilon omega s);writeControl timeStep;writeInterval 10;}} scalarMixing{{type scalarTransport;libs ("libsolverFunctionObjects.so");field s;phi phi;D 1e-9;resetOnStartUp no;}}}}\n''')
+        (root/'system/fvSchemes').write_text('''FoamFile{format ascii;class dictionary;object fvSchemes;}\nddtSchemes{default steadyState;} gradSchemes{default cellLimited Gauss linear 1;} divSchemes{default none;div(phi,U) bounded Gauss linearUpwind grad(U);div(phi,k) bounded Gauss upwind;div(phi,epsilon) bounded Gauss upwind;div(phi,omega) bounded Gauss upwind;div(phi,s) bounded Gauss upwind;} laplacianSchemes{default Gauss linear limited 0.5;} interpolationSchemes{default linear;} snGradSchemes{default limited 0.5;} wallDist{method meshWave;}\n''')
+        if app=='pimpleFoam':
+            txt=(root/'system/fvSchemes').read_text().replace('default steadyState','default backward')
+            (root/'system/fvSchemes').write_text(txt)
+        (root/'system/fvSolution').write_text('''FoamFile{format ascii;class dictionary;object fvSolution;}\nsolvers{p{solver GAMG;tolerance 1e-8;relTol 0.05;smoother GaussSeidel;} U{solver smoothSolver;smoother symGaussSeidel;tolerance 1e-7;relTol 0.05;} "(k|epsilon|omega|s)"{solver smoothSolver;smoother symGaussSeidel;tolerance 1e-7;relTol 0.05;}}\nSIMPLE{nNonOrthogonalCorrectors 2;consistent yes;residualControl{p 1e-5;U 1e-6;"(k|epsilon|omega)" 1e-5;}}\nPIMPLE{nOuterCorrectors 2;nCorrectors 2;nNonOrthogonalCorrectors 1;momentumPredictor yes;}\nrelaxationFactors{fields{p 0.3;}equations{U 0.7;"(k|epsilon|omega)" 0.7;}}\n''')
+        (root/'validation/meshStudy.csv').write_text('mesh,cells,h,power_W,torque_Nm,t95_s,max_velocity_m_s,dead_zone_pct\ncoarse,,,,,,,\nmedium,,,,,,,\nfine,,,,,,,\n')
+        bio=io.BytesIO()
+        with zipfile.ZipFile(bio,'w',zipfile.ZIP_DEFLATED) as zf:
+            for f in root.rglob('*'):
+                if f.is_file(): zf.write(f,f.relative_to(root.parent))
+        st.download_button('Download OpenFOAM case ZIP',bio.getvalue(),'bottomMountMixer_OpenFOAM.zip','application/zip')
