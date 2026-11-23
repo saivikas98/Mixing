@@ -260,3 +260,26 @@ with of_tab:
             for f in root.rglob('*'):
                 if f.is_file(): zf.write(f,f.relative_to(root.parent))
         st.download_button('Download OpenFOAM case ZIP',bio.getvalue(),'bottomMountMixer_OpenFOAM.zip','application/zip')
+
+st.divider()
+st.header('Automated ParaView post-processing and hybrid PINN')
+pvtab,pinntab=st.tabs(['ParaView automation','PINN workflow'])
+with pvtab:
+    st.markdown('''The package includes `postprocess.py`, a headless `pvpython`/`pvbatch` script. It reads the latest OpenFOAM time, generates orthogonal velocity slices, 3D pressure/turbulence/scalar images, streamlines, a ParaView state and a point-cloud CSV for PINN training.''')
+    st.code('pvbatch postprocess.py --case /path/to/bottomMountMixer\n# Windows single process:\npvpython postprocess.py --case C:/cases/bottomMountMixer',language='bash')
+    st.download_button('Download ParaView script',open('postprocess.py','rb').read(),'postprocess.py','text/x-python')
+with pinntab:
+    st.markdown(r'''The implemented model is a **hybrid CFD-PINN surrogate**. Inputs are $(x,y,z,N,H,\mu)$ and outputs are $(u,v,w,p,k)$. Training combines supervised OpenFOAM field error with steady incompressible continuity and momentum residual penalties. Use the model to interpolate inside the trained operating envelope, never to replace held-out CFD and experimental validation.''')
+    st.warning('The lightweight trainer omits second-derivative viscous and full RANS closure residuals. For final research use, replace it with PhysicsNeMo Navier-Stokes plus k-omega residuals or adapt the CFD-PINN-StirredTank repository.')
+    traincsv=st.file_uploader('Upload ParaView PINN training CSV',type='csv',key='pinncsv')
+    epochs=st.number_input('Training epochs',100,100000,5000,100)
+    if traincsv:
+        preview=pd.read_csv(traincsv,nrows=1000);st.dataframe(preview.head(),use_container_width=True)
+        st.info('Save the uploaded CSV and run: python pinn_train.py --csv pinn_training.csv --out pinn_model --epochs '+str(epochs))
+    st.download_button('Download PINN trainer',open('pinn_train.py','rb').read(),'pinn_train.py','text/x-python')
+    st.markdown('''**Required validation split**
+- Hold out entire RPM/fill-height combinations, not random spatial points.
+- Report component-wise NRMSE and R² for Ux, Uy, Uz, p and k.
+- Check continuity residual and momentum residual distributions.
+- Recalculate power, torque, dead-zone fraction and t95 from PINN fields.
+- Recommended screening gates: velocity NRMSE <=10%, power/torque error <=10%, t95 error <=15%, and no systematic wall/impeller bias.''')
